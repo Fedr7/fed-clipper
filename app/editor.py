@@ -1,4 +1,4 @@
-"""Fed Clipper editor: tweak the cuts and the look of a Fed video, preview it, save it."""
+"""Breachcut editor: tweak the cuts and the look of an edit, preview it, save it as TikTok and/or YouTube."""
 import os
 import threading
 import tkinter as tk
@@ -7,8 +7,8 @@ from tkinter import filedialog, messagebox
 import autoclip_core as core
 from player import Player, fmt
 
-BG, PANEL, CARD, CARD_HI = "#0e0b14", "#15101e", "#1c1628", "#2a2040"
-TEXT, MUTED, ACCENT, GOOD, WARN = "#f1edff", "#9d93b8", "#b9a6ff", "#7ee2a8", "#ffa94d"
+BG, PANEL, CARD, CARD_HI = "#0d0b12", "#13101a", "#1a1622", "#251f31"
+TEXT, MUTED, ACCENT, GOOD, WARN = "#f3f0fa", "#958da8", "#ff4d6d", "#5ee0a0", "#ffb454"
 FONT = "Segoe UI"
 PREVIEWS = os.path.join(core.APP_DIR, "previews")
 
@@ -21,12 +21,14 @@ class Editor(tk.Toplevel):
         self.title("Edit · " + " · ".join(x for x in (kind or "Clip", op, mp) if x))
         self.geometry("1240x820")
         self.minsize(1100, 760)
-        icon = os.path.join(core.ASSETS, "fed.ico")
-        if os.path.exists(icon):
-            try:
-                self.iconbitmap(icon)
-            except tk.TclError:
-                pass
+        for ico in ("breachcut.ico", "fed.ico"):
+            icon = os.path.join(core.ASSETS, ico)
+            if os.path.exists(icon):
+                try:
+                    self.iconbitmap(icon)
+                    break
+                except tk.TclError:
+                    pass
         self.edits = core.load_edits()
         mine = self.edits.get(clip["id"]) or {}
         self.segs = [list(x) for x in mine.get("segments") or
@@ -38,6 +40,7 @@ class Editor(tk.Toplevel):
         self.busy = False
         self.mode = "source"
         self.preview_path = None
+        self.pfmt = tk.StringVar(value="vertical")
         self._build()
         self.show_source(play=False)
         self.protocol("WM_DELETE_WINDOW", self.close)
@@ -46,8 +49,8 @@ class Editor(tk.Toplevel):
     # ------------------------------------------------------------------ layout
     def btn(self, parent, text, cmd, accent=False, small=False):
         return tk.Button(parent, text=text, command=cmd, bg=ACCENT if accent else CARD_HI,
-                         fg="#140d22" if accent else TEXT, activebackground="#cfc2ff" if accent else "#3a2d58",
-                         activeforeground="#140d22" if accent else TEXT, relief="flat", bd=0,
+                         fg="#ffffff" if accent else TEXT, activebackground="#ff7590" if accent else "#342b45",
+                         activeforeground="#ffffff" if accent else TEXT, relief="flat", bd=0,
                          padx=8 if small else 12, pady=3 if small else 6,
                          font=(FONT, 9 if small else 10, "bold"), cursor="hand2")
 
@@ -64,6 +67,11 @@ class Editor(tk.Toplevel):
         self.src_btn.pack(side="left")
         self.prev_btn = self.btn(top, "Preview", self.show_preview, small=True)
         self.prev_btn.pack(side="left", padx=6)
+        for val, txt in (("vertical", "▯ TikTok"), ("wide", "▭ YouTube")):
+            tk.Radiobutton(top, text=txt, value=val, variable=self.pfmt, indicatoron=False, bg=CARD, fg=TEXT,
+                           selectcolor=ACCENT, activebackground=CARD_HI, activeforeground=TEXT, relief="flat", bd=0,
+                           padx=8, pady=3, font=(FONT, 9, "bold"), cursor="hand2",
+                           command=self._pfmt_changed).pack(side="left", padx=(2, 0))
         self.mode_l = tk.Label(top, text="", fg=MUTED, bg=BG, font=(FONT, 9))
         self.mode_l.pack(side="left", padx=6)
         self.player = Player(left, 600, 620, bg=BG, fg=TEXT, accent=ACCENT, on_time=self._on_time)
@@ -100,7 +108,7 @@ class Editor(tk.Toplevel):
         self.v = {}
         row = tk.Frame(right, bg=PANEL)
         row.pack(fill="x", padx=14)
-        for key, text in (("intro", "FED intro"), ("voice", "\"Fed\" voice"), ("sharpen", "Sharpen")):
+        for key, text in (("intro", "Name intro"), ("voice", "Intro voice"), ("sharpen", "Sharpen")):
             var = tk.BooleanVar(value=bool(self.style[key]))
             self.v[key] = var
             tk.Checkbutton(row, text=text, variable=var, bg=PANEL, fg=TEXT, selectcolor=CARD, activebackground=PANEL,
@@ -145,6 +153,16 @@ class Editor(tk.Toplevel):
         self.btn(act, "Save as my default look", self.save_default).pack(side="left", padx=6)
         self.save_b = self.btn(act, "★  Save video", self.save_video, accent=True)
         self.save_b.pack(side="right")
+        fr = tk.Frame(right, bg=PANEL)
+        fr.pack(side="bottom", fill="x", padx=14)
+        tk.Label(fr, text="Save as:", fg=TEXT, bg=PANEL, font=(FONT, 10, "bold")).pack(side="left")
+        auto = self.app.s.get("auto_formats") or ["vertical"]
+        self.out_v = {}
+        for key, text in (("vertical", "TikTok / Shorts"), ("wide", "YouTube widescreen")):
+            var = tk.BooleanVar(value=key in auto)
+            self.out_v[key] = var
+            tk.Checkbutton(fr, text=text, variable=var, bg=PANEL, fg=TEXT, selectcolor=CARD, activebackground=PANEL,
+                           activeforeground=TEXT, font=(FONT, 10)).pack(side="left", padx=(8, 0))
         self.pv_b = self.btn(act, "👁  Preview", self.make_preview)
         self.pv_b.pack(side="right", padx=6)
         self._transition_changed(silent=True)
@@ -173,7 +191,7 @@ class Editor(tk.Toplevel):
             r = tk.Frame(self.parts_f, bg=CARD_HI if sel else CARD)
             r.pack(fill="x", pady=2)
             tk.Button(r, text=f"Part {i + 1}", command=lambda i=i: self.pick(i), relief="flat", bd=0,
-                      bg=ACCENT if sel else CARD_HI, fg="#140d22" if sel else TEXT, font=(FONT, 9, "bold"),
+                      bg=ACCENT if sel else CARD_HI, fg="#ffffff" if sel else TEXT, font=(FONT, 9, "bold"),
                       width=7, cursor="hand2").pack(side="left", padx=(6, 8), pady=4)
             for j, lbl in ((0, "from"), (1, "to")):
                 tk.Label(r, text=lbl, fg=MUTED, bg=r["bg"], font=(FONT, 9)).pack(side="left")
@@ -294,19 +312,24 @@ class Editor(tk.Toplevel):
             return
         self.mode = "preview"
         self.player.load(self.preview_path, play=True)
-        self.mode_l.config(text="Preview of your Fed video (half quality, just for checking)")
+        self.mode_l.config(text="Preview (half quality, just for checking)")
         self._paint_mode()
 
     def _paint_mode(self):
         for b, m in ((self.src_btn, "source"), (self.prev_btn, "preview")):
             on = self.mode == m
-            b.config(bg=ACCENT if on else CARD_HI, fg="#140d22" if on else TEXT)
+            b.config(bg=ACCENT if on else CARD_HI, fg="#ffffff" if on else TEXT)
         st = "normal" if self.mode == "source" else "disabled"
         for b in (self.mark_s, self.mark_e):
             b.config(state=st)
 
     def _on_time(self, pos):
         pass
+
+    def _pfmt_changed(self):
+        self.preview_path = None
+        if self.mode == "preview":
+            self.make_preview()
 
     # ------------------------------------------------------------------ look
     def _transition_changed(self, silent=False):
@@ -418,11 +441,12 @@ class Editor(tk.Toplevel):
     def make_preview(self):
         self.player.pause()
         os.makedirs(PREVIEWS, exist_ok=True)
-        out = os.path.join(PREVIEWS, f"{self.c['id']}.mp4")
-        segs, st = self._segments(), self.current_style()
+        fmt = self.pfmt.get()
+        out = os.path.join(PREVIEWS, f"{self.c['id']}_{fmt}.mp4")
+        segs, st, brand = self._segments(), self.current_style(), self.app.brand()
 
         def fn(enc, log):
-            return core.render(enc, segs, out, log, style=st, preview=True)
+            return core.render(enc, segs, out, log, style=st, preview=True, fmt=fmt, brand=brand)
 
         def done(_):
             self.preview_path = out
@@ -432,21 +456,31 @@ class Editor(tk.Toplevel):
         self._run("Making a quick preview…", fn, done)
 
     def save_video(self):
+        fmts = [k for k, v in self.out_v.items() if v.get()]
+        if not fmts:
+            self.say("Tick TikTok / Shorts or YouTube widescreen first.", WARN)
+            return
         self.player.pause()
-        segs, st = self._segments(), self.current_style()
-        out_dir = self.app.s["output_dir"]
+        segs, st, brand = self._segments(), self.current_style(), self.app.brand()
 
         def fn(enc, log):
-            return core.make_highlight(enc, self.c, out_dir, self.app.state, log, segments=segs, style=st)
+            outs = []
+            for f in fmts:
+                outs.append(core.make_highlight(enc, self.c, self.app.out_dir(f), self.app.state, log,
+                                                segments=segs, style=st, fmt=f, brand=brand))
+            return outs
 
-        def done(out):
-            self.say(f"✅ Saved {os.path.basename(out)} to your Upload folder.", GOOD)
-            self.app.q.put(("made", (self.c["id"], out)))
+        def done(outs):
+            names = " + ".join("YouTube" if "(YouTube)" in o else "TikTok" for o in outs)
+            self.say(f"✅ Saved ({names}). Find it in the TikTok / YouTube tab.", GOOD)
+            for o in outs:
+                self.app.q.put(("made", (self.c["id"], o)))
             self.mode = "preview"
-            self.player.load(out, play=False)
-            self.mode_l.config(text="Your finished Fed video")
+            self.player.load(outs[0], play=False)
+            self.mode_l.config(text="Your finished video")
             self._paint_mode()
-        self._run("Making the full-quality video (this takes a minute)…", fn, done)
+        what = " + ".join("YouTube" if f == "wide" else "TikTok" for f in fmts)
+        self._run(f"Making the full-quality {what} video (this takes a minute)…", fn, done)
 
     def close(self):
         if self.busy and not messagebox.askyesno("Still working",
