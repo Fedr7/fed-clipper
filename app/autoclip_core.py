@@ -35,10 +35,21 @@ def default_desktop():
 
 APP_NAME = "Breachcut"
 
+
+def default_library():
+    """Breachcut's own video library: Videos\\Breachcut (falls back next to the Desktop)."""
+    home = os.path.expanduser("~")
+    for d in (os.path.join(home, "Videos"), os.path.join(home, "OneDrive", "Videos")):
+        if os.path.isdir(d):
+            return os.path.join(d, APP_NAME)
+    return os.path.join(default_desktop(), APP_NAME)
+
 DEFAULTS = {
     "medal_dir": r"C:\Medal",
-    "output_dir": os.path.join(default_desktop(), "Breachcut", "TikTok"),
-    "youtube_dir": os.path.join(default_desktop(), "Breachcut", "YouTube"),
+    "library_dir": default_library(),
+    "output_dir": os.path.join(default_library(), "TikTok"),
+    "youtube_dir": os.path.join(default_library(), "YouTube"),
+    "recordings_dir": os.path.join(default_library(), "Recordings"),
     "auto_formats": ["vertical", "wide"],   # what auto-clip makes
     "creator": "",                # name shown in the intro
     "intro_image": "",            # custom intro PNG (optional)
@@ -48,7 +59,61 @@ DEFAULTS = {
     "modes": ["Ranked", "Unranked", "QuickMatch", "Quick Match", "Standard"],
     "only_new_after": None,       # ISO date; clips older than this are ignored (set on first run)
     "watch_minutes": 5,
+    # general
+    "launch_on_startup": False,
+    "start_minimized": False,
+    "auto_update": True,
+    # clips
+    "clip_pre": 2.8,              # seconds kept before each kill
+    "clip_post": 0.8,             # seconds kept after each kill
+    # export
+    "export_quality": "High",     # High / Balanced / Small file
+    "export_fps": 60,
+    "export_encoder": "Auto",     # Auto / GPU / CPU
+    # recorder (used by the built-in recorder)
+    "rec_replay_on": True,
+    "replay_seconds": 30,
+    "rec_resolution": "Native",
+    "rec_fps": 60,
+    "rec_bitrate": 20,            # Mbps
+    "rec_encoder": "Auto",
+    # audio
+    "rec_game_audio": True,
+    "rec_game_vol": 100,
+    "rec_mic": False,
+    "mic_device": "Default",
+    "mic_vol": 100,
+    "separate_tracks": True,
+    "push_to_talk": False,
+    # hotkeys
+    "hk_clip": "F8",
+    "hk_record": "F9",
+    "hk_bookmark": "F10",
+    # storage
+    "storage_limit_gb": 50,
+    "auto_delete_days": 0,        # 0 = never
+    "delete_when_full": True,
+    # notifications
+    "notify_made": True,
+    "notify_sound": True,
+    "notify_update": True,
 }
+
+QUALITY_CRF = {"High": 16, "Balanced": 20, "Small file": 24}
+PAD = {"pre": 2.8, "post": 0.8}
+
+
+def apply_settings(s, enc=None):
+    """Push settings that the render code reads into this module and the encoder."""
+    try:
+        PAD["pre"] = max(0.5, min(8.0, float(s.get("clip_pre", 2.8))))
+        PAD["post"] = max(0.2, min(6.0, float(s.get("clip_post", 0.8))))
+    except (TypeError, ValueError):
+        pass
+    if enc is not None:
+        enc.quality = QUALITY_CRF.get(s.get("export_quality"), 16)
+        enc.fps = 30 if str(s.get("export_fps")) == "30" else 60
+        enc.force_cpu = s.get("export_encoder") == "CPU"
 
 
 def load_settings():
@@ -172,6 +237,9 @@ class Encoder:
             r = subprocess.run([self.ff, "-v", "error", "-f", "lavfi", "-i", "color=s=256x256:d=0.2", "-c:v", "h264_nvenc",
                                 "-f", "null", "-"], capture_output=True, creationflags=NO_WINDOW)
             self.nvenc = r.returncode == 0
+        self.quality = None
+        self.fps = 60
+        self.force_cpu = False
 
     def _run(self, args, capture=False):
         r = subprocess.run(args, capture_output=True, text=True, creationflags=NO_WINDOW)
@@ -180,7 +248,9 @@ class Encoder:
         return (r.stdout or "") + (r.stderr or "") if capture else r
 
     def venc(self, quality=16):
-        if self.nvenc:
+        if self.quality is not None:
+            quality = self.quality + (quality - 16)
+        if self.nvenc and not self.force_cpu:
             return ["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", str(quality + 3), "-b:v", "0"]
         return ["-c:v", "libx264", "-preset", "fast", "-crf", str(quality)]
 
@@ -399,8 +469,8 @@ def render(enc, segments, out_path, log=print, style=None, preview=False, fmt="v
     else:
         W, H, FH, FY, LY = _ev(1080 * k), _ev(1920 * k), _ev(1654 * k), _ev(266 * k), _ev(600 * k)
         logo_k = k
-    fps = 30 if preview else 60
-    venc = (["-c:v", "h264_nvenc", "-preset", "p1", "-cq", "30"] if enc.nvenc else
+    fps = 30 if preview else getattr(enc, "fps", 60)
+    venc = (["-c:v", "h264_nvenc", "-preset", "p1", "-cq", "30"] if enc.nvenc and not getattr(enc, "force_cpu", False) else
             ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "27"]) if preview else None
     work = tempfile.mkdtemp(prefix="fedclip_")
     sharpen = ("cas=0.7," if enc.has_cas else "") + "unsharp=5:5:0.9:3:3:0.4," if st["sharpen"] else ""
@@ -516,7 +586,9 @@ def render(enc, segments, out_path, log=print, style=None, preview=False, fmt="v
     return T
 
 
-def clip_segments(c, pre=2.8, post=0.8, merge=1.5):
+def clip_segments(c, pre=None, post=None, merge=1.5):
+    pre = PAD["pre"] if pre is None else pre
+    post = PAD["post"] if post is None else post
     if not c["kills"]:
         end = c.get("dur") or 30.0
         return [(c["path"], max(0.0, end - 15.0), end - 0.2)]
@@ -677,3 +749,170 @@ MAPS = {m.lower() for m in (
     "Bank", "Border", "Chalet", "Clubhouse", "Club", "Coastline", "Consulate", "Emerald Plains", "Favela", "Fortress",
     "Hereford", "House", "Kafe", "Kanal", "Lair", "Nighthaven", "Nighthaven Labs", "Oregon", "Outback", "Plane",
     "Skyscraper", "Stadium", "Theme Park", "Tower", "Villa", "Yacht", "Calypso", "Close Quarter")}
+
+
+# ------------------------------------------------------------------ storage (Breachcut's own library)
+VIDEO_EXT = (".mp4", ".mov", ".mkv")
+
+
+def library_folders(s):
+    """(label, path) for every folder Breachcut stores videos in."""
+    return [("TikTok / Shorts", s.get("output_dir") or ""), ("YouTube", s.get("youtube_dir") or ""),
+            ("Recordings", s.get("recordings_dir") or "")]
+
+
+def _videos_in(folder):
+    out = []
+    if folder and os.path.isdir(folder):
+        for n in os.listdir(folder):
+            p = os.path.join(folder, n)
+            if n.lower().endswith(VIDEO_EXT) and os.path.isfile(p) and not n.endswith(".part.mp4"):
+                try:
+                    st = os.stat(p)
+                    out.append((p, st.st_size, st.st_mtime))
+                except OSError:
+                    pass
+    return out
+
+
+def storage_usage(s):
+    """{'folders': [(label, path, bytes, count)], 'total': bytes, 'thumbs': bytes, 'free': bytes, 'disk': bytes}"""
+    rows, total = [], 0
+    seen = set()
+    for lab, path in library_folders(s):
+        key = os.path.normcase(os.path.abspath(path)) if path else ""
+        vids = [] if key in seen else _videos_in(path)
+        seen.add(key)
+        b = sum(v[1] for v in vids)
+        rows.append((lab, path, b, len(vids)))
+        total += b
+    th = 0
+    if os.path.isdir(THUMBS):
+        for n in os.listdir(THUMBS):
+            try:
+                th += os.path.getsize(os.path.join(THUMBS, n))
+            except OSError:
+                pass
+    free = disk = 0
+    probe = next((p for _, p in library_folders(s) if p and os.path.isdir(p)), None) or s.get("library_dir") or APP_DIR
+    while probe and not os.path.isdir(probe):
+        probe = os.path.dirname(probe)
+    try:
+        du = shutil.disk_usage(probe or APP_DIR)
+        free, disk = du.free, du.total
+    except OSError:
+        pass
+    return {"folders": rows, "total": total, "thumbs": th, "free": free, "disk": disk}
+
+
+def enforce_storage(s, state=None, log=print):
+    """Delete Breachcut-made videos older than the auto-delete age, then the oldest ones while over the size limit.
+    Only touches video files directly inside Breachcut's own output folders. Returns (files, bytes) removed."""
+    vids, seen = [], set()
+    for _, path in library_folders(s):
+        key = os.path.normcase(os.path.abspath(path)) if path else ""
+        if key and key not in seen:
+            seen.add(key)
+            vids += _videos_in(path)
+    vids.sort(key=lambda v: v[2])          # oldest first
+    gone, freed = [], 0
+    days = int(s.get("auto_delete_days") or 0)
+    if days > 0:
+        cutoff = time.time() - days * 86400
+        for v in vids:
+            if v[2] < cutoff:
+                gone.append(v)
+    limit = float(s.get("storage_limit_gb") or 0) * 1024 ** 3
+    if s.get("delete_when_full", True) and limit > 0:
+        left = [v for v in vids if v not in gone]
+        total = sum(v[1] for v in left)
+        for v in left:
+            if total <= limit:
+                break
+            gone.append(v)
+            total -= v[1]
+    for p, size, _ in gone:
+        try:
+            os.remove(p)
+            freed += size
+            if state is not None:
+                remove_video(state, p)
+        except OSError:
+            pass
+    if gone:
+        log(f"Storage: removed {len(gone)} old video(s), freed {fmt_bytes(freed)}")
+    return len(gone), freed
+
+
+def clear_thumbs():
+    n = 0
+    if os.path.isdir(THUMBS):
+        for f in os.listdir(THUMBS):
+            try:
+                os.remove(os.path.join(THUMBS, f))
+                n += 1
+            except OSError:
+                pass
+    return n
+
+
+def move_library(s, new_root, state=None, log=print):
+    """Move every Breachcut video into new_root\\TikTok, \\YouTube, \\Recordings and point the settings there."""
+    targets = {"output_dir": "TikTok", "youtube_dir": "YouTube", "recordings_dir": "Recordings"}
+    moved = 0
+    remap = {}
+    for key, sub in targets.items():
+        src = s.get(key) or ""
+        dst = os.path.join(new_root, sub)
+        os.makedirs(dst, exist_ok=True)
+        if src and os.path.isdir(src) and os.path.normcase(os.path.abspath(src)) != os.path.normcase(os.path.abspath(dst)):
+            for p, _, _ in _videos_in(src):
+                name = os.path.basename(p)
+                target = os.path.join(dst, name)
+                i = 1
+                while os.path.exists(target):
+                    b, e = os.path.splitext(name)
+                    target = os.path.join(dst, f"{b} ({i}){e}")
+                    i += 1
+                try:
+                    shutil.move(p, target)
+                    remap[p] = target
+                    moved += 1
+                except OSError as ex:
+                    log(f"Couldn't move {name}: {ex}")
+        s[key] = dst
+    s["library_dir"] = new_root
+    if state is not None and remap:
+        for v in state.get("videos", []):
+            if v.get("path") in remap:
+                v["path"] = remap[v["path"]]
+        for d in (state.get("done") or {}).values():
+            for k in ("made", "wide"):
+                if d.get(k) in remap:
+                    d[k] = remap[d[k]]
+        save_state(state)
+    save_settings(s)
+    return moved
+
+
+def fmt_bytes(n):
+    n = float(n or 0)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return f"{n:.0f} {unit}" if unit in ("B", "KB") else f"{n:.1f} {unit}"
+        n /= 1024
+
+
+def audio_devices():
+    """Microphone names Windows exposes to FFmpeg (DirectShow). Empty list off Windows / on failure."""
+    ff = find_ffmpeg()
+    if not ff or os.name != "nt":
+        return []
+    r = subprocess.run([ff, "-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"],
+                       capture_output=True, text=True, creationflags=NO_WINDOW)
+    out = []
+    for line in (r.stderr or "").splitlines():
+        m = re.search(r'"([^"]+)"\s*\(audio\)', line)
+        if m and m.group(1) not in out:
+            out.append(m.group(1))
+    return out
