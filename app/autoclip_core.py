@@ -1,8 +1,9 @@
 """
-Fed Auto Clipper - core (no UI).
-Finds R6 multi-kills in Medal's clip database and renders them in the Fed v5 style:
-vertical 1080x1920, haze/purple grade, sharpened, glowing FED intro + voice, flash cuts, no music.
+Breachcut - core (no UI).
+Finds R6 multi-kills in Medal's clip database and renders them as TikTok/Shorts (vertical 1080x1920)
+or YouTube widescreen (1920x1080) edits: haze grade, sharpened, glowing name intro, flash cuts.
 """
+import hashlib
 import glob
 import json
 import os
@@ -32,9 +33,17 @@ def default_desktop():
     return home
 
 
+APP_NAME = "Breachcut"
+
 DEFAULTS = {
     "medal_dir": r"C:\Medal",
-    "output_dir": os.path.join(default_desktop(), "Upload tiktok"),
+    "output_dir": os.path.join(default_desktop(), "Breachcut", "TikTok"),
+    "youtube_dir": os.path.join(default_desktop(), "Breachcut", "YouTube"),
+    "auto_formats": ["vertical", "wide"],   # what auto-clip makes
+    "creator": "",                # name shown in the intro
+    "intro_image": "",            # custom intro PNG (optional)
+    "voice_file": "",             # custom intro voice (optional)
+    "onboarded": False,
     "min_kills": 3,               # 3 = 3Ks, 4Ks and Aces
     "modes": ["Ranked", "Unranked", "QuickMatch", "Quick Match", "Standard"],
     "only_new_after": None,       # ISO date; clips older than this are ignored (set on first run)
@@ -44,12 +53,38 @@ DEFAULTS = {
 
 def load_settings():
     s = dict(DEFAULTS)
-    if os.path.exists(SETTINGS_FILE):
+    existed = os.path.exists(SETTINGS_FILE)
+    if existed:
         try:
             s.update(json.load(open(SETTINGS_FILE, encoding="utf-8")))
         except Exception:
             pass
+    return migrate_settings(s, existed)
+
+
+def migrate_settings(s, existed):
+    """Older Fed Clipper installs: keep the FED logo/voice as this user's brand."""
+    if existed and not s.get("creator") and not s.get("onboarded"):
+        logo, voice = os.path.join(ASSETS, "fed_logo_glow.png"), os.path.join(ASSETS, "fed_voice.mp3")
+        s["creator"] = "Fed"
+        if os.path.exists(logo):
+            s["intro_image"] = logo
+        if os.path.exists(voice):
+            s["voice_file"] = voice
+        if os.path.basename(s.get("output_dir", "")) == "Upload tiktok":
+            s["youtube_dir"] = os.path.join(os.path.dirname(s["output_dir"]), "Upload youtube")
+        s["onboarded"] = True
+        save_settings(s)
     return s
+
+
+def find_medal_dir():
+    home = os.path.expanduser("~")
+    for d in (r"C:\Medal", r"D:\Medal", os.path.join(home, "Medal"), os.path.join(home, "Videos", "Medal"),
+              os.path.join(os.environ.get("APPDATA", ""), "Medal")):
+        if os.path.isdir(os.path.join(d, "Databases")):
+            return d
+    return r"C:\Medal"
 
 
 def save_settings(s):
@@ -279,6 +314,61 @@ def save_edits(e):
     os.replace(tmp, EDITS_FILE)
 
 
+FONT_FILE = os.path.join(ASSETS, "Anton-Regular.ttf")
+if not os.path.exists(FONT_FILE):   # older installs: use a built-in Windows font
+    for _f in (r"C:\Windows\Fonts\impact.ttf", r"C:\Windows\Fonts\arialbd.ttf"):
+        if os.path.exists(_f):
+            FONT_FILE = _f
+            break
+INTRO_DIR = os.path.join(APP_DIR, "intro")
+
+
+def make_name_intro(text):
+    """Render the creator's name as a glowing intro title (1080x700 PNG, cached)."""
+    from PIL import Image, ImageDraw, ImageFilter, ImageFont
+    text = (text or "").strip().upper()[:16]
+    if not text:
+        return None
+    os.makedirs(INTRO_DIR, exist_ok=True)
+    out = os.path.join(INTRO_DIR, hashlib.md5(text.encode("utf-8")).hexdigest()[:10] + ".png")
+    if os.path.exists(out):
+        return out
+    W, H = 1080, 700
+    size = 330
+    font = ImageFont.truetype(FONT_FILE, size)
+    d0 = ImageDraw.Draw(Image.new("L", (1, 1)))
+    while size > 90 and d0.textlength(text, font=font) > 900:
+        size -= 10
+        font = ImageFont.truetype(FONT_FILE, size)
+    layer = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    ImageDraw.Draw(layer).text((W // 2, H // 2), text, font=font, fill=(255, 255, 255, 255), anchor="mm")
+    out_im = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    for r, a in ((46, 0.9), (18, 1.0), (6, 1.0)):
+        g = layer.filter(ImageFilter.GaussianBlur(r))
+        g.putalpha(g.getchannel("A").point(lambda v, a=a: min(255, int(v * a))))
+        out_im = Image.alpha_composite(out_im, g)
+    out_im = Image.alpha_composite(out_im, layer)
+    out_im.save(out)
+    return out
+
+
+def brand_assets(settings=None):
+    """(intro_png or None, voice_file or None) for this user."""
+    s = settings or {}
+
+    def resolve(p):   # file moved with the app (e.g. Fed Clipper -> Breachcut folder)? look in our assets
+        if p and not os.path.exists(p) and os.path.exists(os.path.join(ASSETS, os.path.basename(p))):
+            return os.path.join(ASSETS, os.path.basename(p))
+        return p
+    img = resolve(s.get("intro_image") or "")
+    if not (img and os.path.exists(img)):
+        img = make_name_intro(s.get("creator", "")) if s.get("creator") else None
+    voice = resolve(s.get("voice_file") or "")
+    if not (voice and os.path.exists(voice)):
+        voice = None
+    return img, voice
+
+
 def _ev(n):
     return max(2, int(round(n / 2)) * 2)
 
@@ -289,13 +379,26 @@ def _pulse(cuts, d, amt):
     return "+".join(f"{amt}*max(0,1-abs(t-{c:.3f})/{d:.3f})" for c in cuts)
 
 
-def render(enc, segments, out_path, log=print, style=None, preview=False):
-    """segments: list of (video_path, start, end). Writes a finished Fed video.
-    style: overrides for DEFAULT_STYLE. preview=True makes a fast half-size draft."""
+def render(enc, segments, out_path, log=print, style=None, preview=False, fmt="vertical", brand=None):
+    """segments: list of (video_path, start, end). Writes a finished edit.
+    fmt: "vertical" (TikTok/Shorts 1080x1920) or "wide" (YouTube 1920x1080).
+    style: overrides for DEFAULT_STYLE. preview=True makes a fast half-size draft.
+    brand: (intro_png, voice_file) - either may be None."""
+    if brand is None:
+        brand = (os.path.join(ASSETS, "fed_logo_glow.png"), os.path.join(ASSETS, "fed_voice.mp3"))
+    intro_png, voice_file = brand
+    intro_png = intro_png if intro_png and os.path.exists(intro_png) else None
+    voice_file = voice_file if voice_file and os.path.exists(voice_file) else None
+    wide = fmt == "wide"
     st = dict(DEFAULT_STYLE)
     st.update({k: v for k, v in (style or {}).items() if k in DEFAULT_STYLE})
     k = 0.5 if preview else 1.0
-    W, H, FH, FY, LY = _ev(1080 * k), _ev(1920 * k), _ev(1654 * k), _ev(266 * k), _ev(600 * k)
+    if wide:
+        W, H = _ev(1920 * k), _ev(1080 * k)
+        logo_k, LY = 0.75 * k, None
+    else:
+        W, H, FH, FY, LY = _ev(1080 * k), _ev(1920 * k), _ev(1654 * k), _ev(266 * k), _ev(600 * k)
+        logo_k = k
     fps = 30 if preview else 60
     venc = (["-c:v", "h264_nvenc", "-preset", "p1", "-cq", "30"] if enc.nvenc else
             ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "27"]) if preview else None
@@ -304,12 +407,17 @@ def render(enc, segments, out_path, log=print, style=None, preview=False):
     glow = float(st["glow"]) / 100.0
     glow_chain = (f"split[f1][f2];[f2]gblur=sigma={14 * k:.1f}[gl];[f1][gl]blend=all_mode=screen:all_opacity={glow:.3f},"
                   if glow > 0 else "")
-    fc = (f"[0:v]split[a][b];[a]scale=-2:{H},crop={W}:{H},boxblur={max(2, int(22 * k))}:2,eq=brightness=-0.1:saturation=1.1,"
-          "colorbalance=rs=0.05:gs=-0.07:bs=0.14,format=gbrp[bg];"
-          f"[b]hqdn3d=1.5:1.5:3:3,crop=trunc(ih*0.6528/2)*2:ih:(iw-ow)/2:0,scale={W}:{FH}:flags=spline,"
-          f"{sharpen}eq=contrast=1.08:saturation=1.22,format=gbrp,{glow_chain}"
-          "colorbalance=rs=0.05:gs=-0.07:bs=0.14:rm=0.05:gm=-0.06:bm=0.10:rh=0.03:gh=-0.02:bh=0.05,"
-          f"eq=contrast=1.1:saturation=1.1:gamma=0.96[fg];[bg][fg]overlay=0:{FY},format=yuv420p,fps={fps}[v]")
+    grade = ("colorbalance=rs=0.05:gs=-0.07:bs=0.14:rm=0.05:gm=-0.06:bm=0.10:rh=0.03:gh=-0.02:bh=0.05,"
+             "eq=contrast=1.1:saturation=1.1:gamma=0.96")
+    if wide:
+        fc = (f"[0:v]hqdn3d=1.5:1.5:3:3,scale={W}:{H}:flags=lanczos,"
+              f"{sharpen}eq=contrast=1.08:saturation=1.22,format=gbrp,{glow_chain}{grade},format=yuv420p,fps={fps}[v]")
+    else:
+        fc = (f"[0:v]split[a][b];[a]scale=-2:{H},crop={W}:{H},boxblur={max(2, int(22 * k))}:2,eq=brightness=-0.1:saturation=1.1,"
+              "colorbalance=rs=0.05:gs=-0.07:bs=0.14,format=gbrp[bg];"
+              f"[b]hqdn3d=1.5:1.5:3:3,crop=trunc(ih*0.6528/2)*2:ih:(iw-ow)/2:0,scale={W}:{FH}:flags=spline,"
+              f"{sharpen}eq=contrast=1.08:saturation=1.22,format=gbrp,{glow_chain}{grade}[fg];"
+              f"[bg][fg]overlay=0:{FY},format=yuv420p,fps={fps}[v]")
     cuts, t = [], 0.0
     lst = os.path.join(work, "list.txt")
     with open(lst, "w", encoding="utf-8") as L:
@@ -346,16 +454,18 @@ def render(enc, segments, out_path, log=print, style=None, preview=False):
         p = _pulse(cuts[:-1], tl, 1.0)
         if p:
             vf.append(f"eq=brightness='-min(1,{p})':saturation='1-min(1,{p})':contrast='1-min(1,{p})':eval=frame")
-    intro = bool(st["intro"])
+    intro = bool(st["intro"]) and intro_png is not None
     if intro:
         vf.append("eq=brightness=-0.2:saturation=0.8:enable='between(t,0.3,1.95)'")
     vchain = "[0:v]" + ",".join(vf) + "[d];"
     if intro:
         logo_i = nxt
         nxt += 1
-        inputs += ["-loop", "1", "-t", "2.1", "-framerate", str(fps), "-i", os.path.join(ASSETS, "fed_logo_glow.png")]
-        vchain += (f"[{logo_i}:v]format=rgba,scale=iw*{k}:-1,fade=t=in:st=0.3:d=0.15:alpha=1,fade=t=out:st=1.6:d=0.35:alpha=1[tt];"
-                   f"[d][tt]overlay=0:{LY}:enable='between(t,0.3,2.0)':format=auto,")
+        inputs += ["-loop", "1", "-t", "2.1", "-framerate", str(fps), "-i", intro_png]
+        ypos = "(H-h)/2" if LY is None else str(LY)
+        vchain += (f"[{logo_i}:v]format=rgba,scale=1080*{logo_k}:700*{logo_k},fade=t=in:st=0.3:d=0.15:alpha=1,"
+                   f"fade=t=out:st=1.6:d=0.35:alpha=1[tt];"
+                   f"[d][tt]overlay=(W-w)/2:{ypos}:enable='between(t,0.3,2.0)':format=auto,")
     else:
         vchain += "[d]"
     bright = 0.035 + float(st["brightness"]) / 100.0
@@ -368,13 +478,14 @@ def render(enc, segments, out_path, log=print, style=None, preview=False):
     vchain += ",format=yuv420p[v]"
 
     gv = float(st["game_vol"]) / 100.0
-    duck = intro or st["voice"]
+    use_voice = bool(st["voice"]) and voice_file is not None
+    duck = intro or use_voice
     achain = f"[0:a]volume='{gv:.2f}*if(lt(t,2.0),{0.45 if duck else 1},1)':eval=frame[g];"
     mix = ["[g]"]
-    if st["voice"]:
+    if use_voice:
         vi = nxt
         nxt += 1
-        inputs += ["-i", os.path.join(ASSETS, "fed_voice.mp3")]
+        inputs += ["-i", voice_file]
         achain += f"[{vi}:a]aresample=48000,volume=3.0,adelay=300|300[vo];"
         mix.append("[vo]")
     music = st.get("music") or ""
@@ -421,6 +532,43 @@ def clip_segments(c, pre=2.8, post=0.8, merge=1.5):
     return [(c["path"], s, e) for s, e in wins]
 
 
+def video_entry(path, fmt, clip_id=None, title=None, seconds=None, kind="highlight"):
+    return {"path": path, "fmt": fmt, "clip_id": clip_id, "title": title or os.path.splitext(os.path.basename(path))[0],
+            "seconds": round(seconds or 0, 1), "kind": kind, "made_at": datetime.now().isoformat(timespec="seconds")}
+
+
+def add_video(state, entry):
+    vids = [v for v in state.setdefault("videos", []) if v.get("path") != entry["path"]]
+    vids.append(entry)
+    state["videos"] = vids
+    save_state(state)
+
+
+def list_videos(state, fmt=None):
+    """Made videos that still exist, newest first (includes ones made by older versions)."""
+    vids = list(state.get("videos", []))
+    known = {v.get("path") for v in vids}
+    for cid, d in (state.get("done") or {}).items():
+        for key, f in (("made", "vertical"), ("wide", "wide")):
+            p = d.get(key)
+            if p and p not in known:
+                vids.append({"path": p, "fmt": f, "clip_id": cid, "title": os.path.splitext(os.path.basename(p))[0],
+                             "seconds": d.get("seconds", 0), "kind": "highlight", "made_at": d.get("at", "")})
+                known.add(p)
+    vids = [v for v in vids if v.get("path") and os.path.exists(v["path"]) and (fmt is None or v.get("fmt") == fmt)]
+    vids.sort(key=lambda v: v.get("made_at") or "", reverse=True)
+    return vids
+
+
+def remove_video(state, path):
+    state["videos"] = [v for v in state.get("videos", []) if v.get("path") != path]
+    for d in (state.get("done") or {}).values():
+        for key in ("made", "wide"):
+            if d.get(key) == path:
+                d.pop(key, None)
+    save_state(state)
+
+
 def label(c):
     names = {5: "Ace", 4: "4K", 3: "3K"}
     kind = names.get(c["top"]) or (f"{len(c['kills'])}K" if len(c["kills"]) > 1 else "Clip")
@@ -429,22 +577,25 @@ def label(c):
     return NAME_BAD.sub("", " - ".join(["R6 " + kind] + bits + [when]))
 
 
-def make_highlight(enc, c, out_dir, state, log=print, segments=None, style=None):
+def make_highlight(enc, c, out_dir, state, log=print, segments=None, style=None, fmt="vertical", brand=None):
     os.makedirs(out_dir, exist_ok=True)
-    out = os.path.join(out_dir, f"{label(c)} (Fed).mp4")
+    suffix = " (YouTube)" if fmt == "wide" else ""
+    out = os.path.join(out_dir, f"{label(c)}{suffix}.mp4")
     log(f"Making {os.path.basename(out)}")
     if segments is None:
         ed = load_edits().get(c["id"]) or {}
         segments = [(c["path"], a, b) for a, b in ed["segments"]] if ed.get("segments") else clip_segments(c)
         style = ed.get("style") or style
-    length = render(enc, segments, out, log, style=style)
-    state["done"][c["id"]] = {"made": out, "at": datetime.now().isoformat(timespec="seconds"),
-                              "clip_time": clip_time(c).isoformat(), "top": c["top"], "seconds": round(length, 1)}
-    save_state(state)
+    length = render(enc, segments, out, log, style=style, fmt=fmt, brand=brand)
+    d = state["done"].setdefault(c["id"], {})
+    d.update({"made" if fmt != "wide" else "wide": out, "at": datetime.now().isoformat(timespec="seconds"),
+              "clip_time": clip_time(c).isoformat(), "top": c["top"], "seconds": round(length, 1)})
+    add_video(state, video_entry(out, fmt, c["id"], label(c), length))
     return out
 
 
-def make_aim_short(enc, clips, settings, out_dir, target_s=60, pre=1.6, post=1.7, log=print, style=None):
+def make_aim_short(enc, clips, settings, out_dir, target_s=60, pre=1.6, post=1.7, log=print, style=None,
+                   fmt="vertical", brand=None, state=None):
     bursts = fastest_bursts(clips, settings)
     if not bursts:
         raise RuntimeError("No multi-kills found to build a short from.")
@@ -460,9 +611,13 @@ def make_aim_short(enc, clips, settings, out_dir, target_s=60, pre=1.6, post=1.7
     segs = [(r["clip"]["path"], max(0, r["a"] - pre), r["b"] + post) for r in picked]
     segs[-1] = (segs[-1][0], segs[-1][1], segs[-1][2] + 0.5)
     os.makedirs(out_dir, exist_ok=True)
-    out = os.path.join(out_dir, f"R6 Aim Short - {datetime.now():%b %d %H%M} (Fed).mp4")
-    log(f"Making aim short from {len(segs)} multi-kills")
-    render(enc, segs, out, log, style=style if style is not None else settings.get("style"))
+    suffix = " (YouTube)" if fmt == "wide" else ""
+    out = os.path.join(out_dir, f"R6 Aim Montage - {datetime.now():%b %d %H%M}{suffix}.mp4")
+    log(f"Making aim montage from {len(segs)} multi-kills")
+    length = render(enc, segs, out, log, style=style if style is not None else settings.get("style"), fmt=fmt,
+                    brand=brand if brand is not None else brand_assets(settings))
+    if state is not None:
+        add_video(state, video_entry(out, fmt, None, os.path.splitext(os.path.basename(out))[0], length, kind="montage"))
     return out
 
 
@@ -486,6 +641,23 @@ def make_thumb(enc, c):
     try:
         enc.run(["-ss", f"{max(0.0, t):.2f}", "-i", c["path"], "-frames:v", "1",
                  "-vf", "scale=320:180:force_original_aspect_ratio=increase,crop=320:180", "-q:v", "4", out])
+    except Exception:
+        return None
+    return out if os.path.exists(out) else None
+
+
+def video_thumb(enc, v):
+    """Thumbnail for a made video: 180x320 (vertical) or 320x180 (wide), cached."""
+    os.makedirs(THUMBS, exist_ok=True)
+    key = hashlib.md5((v["path"] + str(os.path.getmtime(v["path"]) if os.path.exists(v["path"]) else "")).encode()).hexdigest()[:12]
+    out = os.path.join(THUMBS, f"v_{key}.jpg")
+    if os.path.exists(out):
+        return out
+    size = "320:180" if v.get("fmt") == "wide" else "180:320"
+    t = max(2.4, float(v.get("seconds") or 6) * 0.45)
+    try:
+        enc.run(["-ss", f"{t:.2f}", "-i", v["path"], "-frames:v", "1",
+                 "-vf", f"scale={size}:force_original_aspect_ratio=increase,crop={size}", "-q:v", "4", out])
     except Exception:
         return None
     return out if os.path.exists(out) else None
