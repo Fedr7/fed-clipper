@@ -1,4 +1,4 @@
-"""Fed Clipper patch updater.
+"""Breachcut patch updater.
 
 Checks GitHub for a newer version.json and downloads the files it lists.
 Your settings, processed list and thumbnails are never touched.
@@ -36,7 +36,7 @@ def _vtuple(v):
 
 
 def _get(url, timeout=15):
-    req = urllib.request.Request(url, headers={"User-Agent": "FedClipper", "Cache-Control": "no-cache"})
+    req = urllib.request.Request(url, headers={"User-Agent": "Breachcut", "Cache-Control": "no-cache"})
     ctx = ssl.create_default_context()
     with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
         return r.read()
@@ -80,4 +80,7 @@ def restart():
         w = exe[:-10] + "pythonw.exe"
         if os.path.exists(w):
             exe = w
-    subprocess.Popen([exe, os.path.join(APP_DIR, "fed_clipper.py")], cwd=APP_DIR)
+    main = os.path.join(APP_DIR, "breachcut.py")
+    if not os.path.exists(main):
+        main = os.path.join(APP_DIR, "fed_clipper.py")
+    subprocess.Popen([exe, main], cwd=APP_DIR)
