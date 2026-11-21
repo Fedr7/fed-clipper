@@ -1,11 +1,12 @@
 {
-  "version": "1.1.0",
-  "notes": "Video editor + in-app player",
+  "version": "1.2.0",
+  "notes": "Fed Clipper is now Breachcut — new look, TikTok + YouTube tabs, widescreen videos",
   "files": [
+    "breachcut.py",
     "autoclip_core.py",
-    "player.py",
     "editor.py",
-    "fed_clipper.py",
-    "updater.py"
+    "player.py",
+    "updater.py",
+    "fed_clipper.py"
   ]
 }
