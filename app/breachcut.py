@@ -1,7 +1,7 @@
 """
 Breachcut - turn your Rainbow Six Siege Medal clips into TikToks, Shorts and YouTube edits.
 
-Pages:  Clips (everything Medal saved) · TikTok · YouTube (Shorts + Widescreen) · Auto-clip · Settings
+Pages:  Home · Clips (everything Medal saved) · TikTok · YouTube (Shorts + Widescreen) · Auto-clip · Settings
 """
 import os
 import queue
@@ -14,27 +14,16 @@ from tkinter import filedialog, messagebox, simpledialog
 
 from PIL import Image, ImageDraw, ImageTk
 
+import auth
 import autoclip_core as core
+import login
 import updater
+import ui_kit as ui
+from ui_kit import (ACCENT, ACCENT_HI, BADGE, BG, CARD, CARD_HI, DIM, FONT, FONT_BOLD, FONT_SEMI, GOOD, LINE,
+                    MUTED, PANEL, SIDE, TEXT, VIOLET, WARN, RoundButton, Toggle)
 from editor import Editor
 from player import Player, fmt as fmt_time
 
-# ---------------------------------------------------------------- theme
-BG = "#0d0b12"          # main background
-SIDE = "#08070c"        # sidebar
-PANEL = "#13101a"       # viewer panel
-CARD = "#1a1622"
-CARD_HI = "#251f31"
-LINE = "#2b2438"
-TEXT = "#f3f0fa"
-MUTED = "#958da8"
-DIM = "#5f586e"
-ACCENT = "#ff4d6d"      # Breachcut pink
-ACCENT_HI = "#ff7590"
-GOOD = "#5ee0a0"
-WARN = "#ffb454"
-BADGE = {"ACE": "#ff4d6d", "4K": "#ffa94d", "3K": "#ffd43b", "2K": "#7aa2ff"}
-FONT = "Segoe UI"
 PAGE = 45
 
 
@@ -55,16 +44,7 @@ def show_in_folder(path):
 
 
 def button(parent, text, cmd, kind="normal", small=False, width=None):
-    colors = {"accent": (ACCENT, "#ffffff", ACCENT_HI), "normal": (CARD_HI, TEXT, "#342b45"),
-              "ghost": (parent["bg"], MUTED, CARD_HI), "danger": (CARD_HI, "#ff8a9e", "#3a2230")}[kind]
-    b = tk.Button(parent, text=text, command=cmd, bg=colors[0], fg=colors[1], activebackground=colors[2],
-                  activeforeground=colors[1], relief="flat", bd=0, cursor="hand2",
-                  padx=10 if small else 14, pady=4 if small else 8, font=(FONT, 9 if small else 10, "bold"))
-    if width:
-        b.config(width=width)
-    b.bind("<Enter>", lambda e: b.config(bg=colors[2]))
-    b.bind("<Leave>", lambda e: b.config(bg=colors[0]))
-    return b
+    return RoundButton(parent, text, cmd, kind=kind, small=small, width=width)
 
 
 def badge_image(text, color, h=20, font_px=11):
@@ -117,7 +97,7 @@ def compose_thumb(path, size, badges_tl=(), badge_br=None, marks_bl=()):
         b = badge_image(text, color, h=18, font_px=10)
         im.alpha_composite(b, (x, h - b.height - 8))
         x += b.width + 4
-    return im.convert("RGB")
+    return ui.round_corners(im.convert("RGB"), 12, BG)
 
 
 def clip_badges(c):
@@ -178,18 +158,262 @@ class Page(tk.Frame):
     def __init__(self, app):
         super().__init__(app.main, bg=BG)
         self.app = app
-        head = tk.Frame(self, bg=BG)
-        head.pack(fill="x", padx=28, pady=(22, 4))
-        left = tk.Frame(head, bg=BG)
-        left.pack(side="left")
-        tk.Label(left, text=self.title, fg=TEXT, bg=BG, font=(FONT, 20, "bold")).pack(anchor="w")
-        self.sub = tk.Label(left, text=self.subtitle, fg=MUTED, bg=BG, font=(FONT, 10))
-        self.sub.pack(anchor="w")
-        self.head_right = tk.Frame(head, bg=BG)
-        self.head_right.pack(side="right")
+        self.head = tk.Canvas(self, height=104, bg=BG, highlightthickness=0, bd=0)
+        self.head.pack(fill="x")
+        self._head_img = None
+        self._t = self.head.create_text(30, 44, text=self.title, fill=TEXT, font=(FONT_BOLD, 22), anchor="w")
+        self._s = self.head.create_text(31, 76, text=self.subtitle, fill=MUTED, font=(FONT, 10), anchor="w")
+        self.head_right = tk.Frame(self.head, bg=BG)
+        self._hr = self.head.create_window(0, 52, window=self.head_right, anchor="e")
+        self.head.bind("<Configure>", self._head_resize)
+        self.sub = _SubLabel(self.head, self._s)
+
+    def _head_resize(self, e):
+        w = max(200, e.width)
+        im = ui.backdrop(w, 104, 0.9, hexes=True, spots=(("accent", 0.0, 0.0, 0.22), ("violet", 0.35, -0.2, 0.18)))
+        self._head_img = ImageTk.PhotoImage(im)
+        self.head.delete("bgimg")
+        self.head.create_image(0, 0, image=self._head_img, anchor="nw", tags=("bgimg",))
+        self.head.tag_lower("bgimg")
+        self.head.coords(self._hr, w - 24, 52)
 
     def on_show(self):
         pass
+
+
+class _SubLabel:
+    """Lets old code call page.sub.config(text=...) on a canvas text item."""
+
+    def __init__(self, canvas, item):
+        self.c, self.i = canvas, item
+
+    def config(self, **kw):
+        if "text" in kw:
+            self.c.itemconfig(self.i, text=kw["text"])
+
+    configure = config
+
+
+def search_box(parent, var, placeholder="Search"):
+    """Rounded search field."""
+    bgc = ui._bg_of(parent)
+    c = tk.Canvas(parent, width=290, height=36, bg=bgc, highlightthickness=0, bd=0)
+    im = Image.new("RGBA", (290, 36), ui.rgb(bgc) + (255,))
+    im.alpha_composite(ui.rounded_rect(290, 36, 18, CARD, outline=LINE, width=1))
+    c._img = ImageTk.PhotoImage(im)
+    c.create_image(0, 0, image=c._img, anchor="nw")
+    c.create_text(18, 18, text="⌕", fill=MUTED, font=(FONT, 12))
+    e = tk.Entry(c, textvariable=var, bg=CARD, fg=TEXT, insertbackground=TEXT, relief="flat", bd=0,
+                 font=(FONT, 10), width=28)
+    c.create_window(34, 18, window=e, anchor="w")
+    hint = c.create_text(36, 18, text=placeholder, fill=DIM, font=(FONT, 10), anchor="w")
+
+    def upd(*_):
+        c.itemconfig(hint, text="" if var.get() else placeholder)
+    var.trace_add("write", upd)
+    e.bind("<FocusIn>", lambda ev: c.itemconfig(hint, text=""))
+    e.bind("<FocusOut>", upd)
+    c.bind("<Button-1>", lambda ev: e.focus_set())
+    return c
+
+
+class HomePage(tk.Frame):
+    """Landing page after sign-in: welcome hero, stats, ready-to-edit highlights, latest videos."""
+
+    def __init__(self, app):
+        super().__init__(app.main, bg=BG)
+        self.app = app
+        self.scroll = ScrollGrid(self)
+        self.scroll.pack(fill="both", expand=True)
+        self.body = self.scroll.inner
+        self._imgs = []
+        self._last_w = 0
+        self.scroll.canvas.bind("<Configure>", self._resized, add="+")
+
+    def _resized(self, e):
+        if abs(e.width - self._last_w) > 40 and self.winfo_ismapped():
+            self.render()
+
+    def on_show(self):
+        self.render()
+
+    def width(self):
+        w = self.scroll.canvas.winfo_width()
+        if w < 100:
+            w = max(700, self.app.root.winfo_width() - 230 - 440 - 30)
+        return w
+
+    def render(self):
+        app = self.app
+        for w in self.body.winfo_children():
+            w.destroy()
+        self._imgs = []
+        W = self.width() - 8
+        self._last_w = W + 8
+        info = app.user or {}
+        name = info.get("name") or app.s.get("creator") or "there"
+        clips = app.clips
+        aces = sum(1 for c in clips if c["top"] >= 5)
+        tt = len(core.list_videos(app.state, "vertical"))
+        yt = len(core.list_videos(app.state, "wide"))
+        ready = app.ready_highlights()
+
+        # ---- hero
+        H = 196
+        hero = tk.Canvas(self.body, width=W, height=H, bg=BG, highlightthickness=0, bd=0)
+        hero.pack(fill="x", padx=(4, 0))
+        bg = ui.backdrop(W, H, 1.5, spots=(("accent", 0.08, 0.1, 0.32), ("violet", 0.78, -0.1, 0.30))).convert("RGBA")
+        bg = ui.round_corners(bg, 0, BG)
+        ph = ImageTk.PhotoImage(bg)
+        self._imgs.append(ph)
+        hero.create_image(0, 0, image=ph, anchor="nw")
+        av = app.avatar_image(84, ring=ACCENT, bg=None)
+        if av is not None:
+            avp = ImageTk.PhotoImage(av)
+            self._imgs.append(avp)
+            hero.create_image(40, H // 2, image=avp, anchor="w")
+        x = 148
+        hour = datetime.now().hour
+        greet = "Good morning" if hour < 12 else ("Good afternoon" if hour < 18 else "Good evening")
+        hero.create_text(x, H // 2 - 34, text=greet.upper(), fill=ACCENT, font=(FONT_SEMI, 9), anchor="w")
+        hero.create_text(x, H // 2 - 4, text=f"Welcome back, {name}", fill=TEXT, font=(FONT_BOLD, 24), anchor="w")
+        if ready:
+            sub = f"{len(ready)} new highlight{'s' if len(ready) != 1 else ''} ready to edit."
+        elif clips:
+            sub = "You're all caught up. Go hit some heads."
+        else:
+            sub = "Play some Siege with Medal running — your clips will show up here."
+        hero.create_text(x, H // 2 + 30, text=sub, fill=MUTED, font=(FONT, 11), anchor="w")
+        btn = RoundButton(hero, "⚡  Make them all" if ready else "🎬  Browse clips",
+                          (lambda: app.make_all(ready)) if ready else (lambda: app.show("clips")),
+                          kind="accent", bg=_hero_px(bg, W - 120, H // 2))
+        hero.create_window(W - 40, H // 2, window=btn, anchor="e")
+
+        # ---- stat cards
+        stats = tk.Frame(self.body, bg=BG)
+        stats.pack(fill="x", padx=(4, 0), pady=(18, 4))
+        items = [("Siege clips", len(clips), "🎬", "clips"), ("Aces", aces, "💀", "clips"),
+                 ("TikToks made", tt, "📱", "tiktok"), ("YouTube videos", yt, "▶", "youtube")]
+        gap = 14
+        cw = int((W - gap * 3) / 4)
+        for i, (label, val, icon, page) in enumerate(items):
+            c = tk.Canvas(stats, width=cw, height=96, bg=BG, highlightthickness=0, bd=0, cursor="hand2")
+            c.grid(row=0, column=i, padx=(0 if i == 0 else gap, 0))
+            im = Image.new("RGBA", (cw, 96), ui.rgb(BG) + (255,))
+            im.alpha_composite(ui.rounded_rect(cw, 96, 16, CARD, outline=LINE, width=1))
+            chip = ui.rounded_rect(34, 34, 10, ACCENT if i == 1 else "#241d31")
+            im.alpha_composite(chip, (18, 18))
+            p2 = ImageTk.PhotoImage(im)
+            self._imgs.append(p2)
+            c.create_image(0, 0, image=p2, anchor="nw")
+            c.create_text(35, 35, text=icon, fill="#ffffff", font=(FONT, 12))
+            c.create_text(cw - 20, 36, text=f"{val:,}", fill=TEXT, font=(FONT_BOLD, 20), anchor="e")
+            c.create_text(18, 74, text=label, fill=MUTED, font=(FONT, 10), anchor="w")
+            c.bind("<Button-1>", lambda e, p=page: app.show(p))
+
+        # ---- ready to edit
+        self._section("Ready to edit", f"{len(ready)} new" if ready else "",
+                      ("Make all", lambda: app.make_all(ready)) if ready else None)
+        row = tk.Frame(self.body, bg=BG)
+        row.pack(fill="x", padx=(4, 0))
+        if not ready:
+            self._empty(row, "No new highlights right now. Turn on Auto-clip and they'll be edited for you.",
+                        "⚡  Auto-clip", lambda: app.show("auto"))
+        else:
+            n = max(1, int(W // 250))
+            tw = int((W - 12 * (n - 1)) / n)
+            for i, c in enumerate(ready[:n]):
+                self._clip_tile(row, c, tw, i)
+
+        # ---- latest videos
+        vids = core.list_videos(app.state)
+        self._section("Your latest videos", f"{len(vids)} total" if vids else "",
+                      ("See all", lambda: app.show("tiktok")) if vids else None)
+        row2 = tk.Frame(self.body, bg=BG)
+        row2.pack(fill="x", padx=(4, 0), pady=(0, 30))
+        if not vids:
+            self._empty(row2, "Videos you make show up here — ready to post.", "🎬  Pick a clip",
+                        lambda: app.show("clips"))
+        else:
+            n = max(1, int(W // 150))
+            tw = int((W - 12 * (n - 1)) / n)
+            for i, v in enumerate(vids[:n]):
+                self._video_tile(row2, v, tw, i)
+
+    def _section(self, title, meta="", action=None):
+        f = tk.Frame(self.body, bg=BG)
+        f.pack(fill="x", padx=(6, 0), pady=(26, 10))
+        tk.Label(f, text=title, fg=TEXT, bg=BG, font=(FONT_BOLD, 14)).pack(side="left")
+        if meta:
+            tk.Label(f, text="  " + meta, fg=MUTED, bg=BG, font=(FONT, 10)).pack(side="left", pady=(4, 0))
+        if action:
+            RoundButton(f, action[0], action[1], kind="ghost", small=True).pack(side="right")
+
+    def _empty(self, parent, text, btn_text, cmd):
+        W = self.width() - 8
+        c = tk.Canvas(parent, width=W, height=110, bg=BG, highlightthickness=0, bd=0)
+        c.pack()
+        im = Image.new("RGBA", (W, 110), ui.rgb(BG) + (255,))
+        im.alpha_composite(ui.rounded_rect(W, 110, 16, PANEL, outline=LINE, width=1))
+        ph = ImageTk.PhotoImage(im)
+        self._imgs.append(ph)
+        c.create_image(0, 0, image=ph, anchor="nw")
+        c.create_text(28, 55, text=text, fill=MUTED, font=(FONT, 11), anchor="w")
+        c.create_window(W - 24, 55, window=RoundButton(c, btn_text, cmd, kind="normal", bg=PANEL), anchor="e")
+
+    def _clip_tile(self, parent, c, tw, i):
+        th = int(tw * 9 / 16)
+        f = tk.Frame(parent, bg=BG, cursor="hand2")
+        f.grid(row=0, column=i, padx=(0 if i == 0 else 12, 0), sticky="n")
+        lab = tk.Label(f, bg=BG, width=tw, height=th, bd=0)
+        lab.pack()
+        tp = core.thumb_path(c)
+        if os.path.exists(tp):
+            dur = c.get("dur") or 0
+            ph = ImageTk.PhotoImage(compose_thumb(tp, (tw, th), clip_badges(c), None))
+            self._imgs.append(ph)
+            lab.config(image=ph, width=tw, height=th)
+        else:
+            self.app.want_thumb(("clip", c))
+        kind, op, mp = core.parts(c)
+        tk.Label(f, text=" · ".join(x for x in (op, mp) if x) or "Clip", fg=TEXT, bg=BG, font=(FONT_SEMI, 10),
+                 anchor="w").pack(fill="x", pady=(6, 0))
+        tk.Label(f, text=core.clip_time(c).strftime("%a %b %d · %I:%M %p").replace(" 0", " "), fg=MUTED, bg=BG,
+                 font=(FONT, 9), anchor="w").pack(fill="x")
+        for w in [f] + list(f.winfo_children()):
+            w.bind("<Button-1>", lambda e, c=c: (self.app.show("clips"), self.app.select_clip(c)))
+
+    def _video_tile(self, parent, v, tw, i):
+        vertical = v.get("fmt") != "wide"
+        th = int(tw * 16 / 9) if vertical else int(tw * 9 / 16)
+        th = min(th, 250)
+        f = tk.Frame(parent, bg=BG, cursor="hand2")
+        f.grid(row=0, column=i, padx=(0 if i == 0 else 12, 0), sticky="n")
+        lab = tk.Label(f, bg=BG, width=tw, height=th, bd=0)
+        lab.pack()
+        tp = self.app.cached_video_thumb(v)
+        if tp:
+            secs = v.get("seconds") or 0
+            badge = [("YT", "#ff4d4d")] if v.get("fmt") == "wide" else [("TT", "#7aa2ff")]
+            ph = ImageTk.PhotoImage(compose_thumb(tp, (tw, th), badge, fmt_time(secs).split(".")[0] if secs else None))
+            self._imgs.append(ph)
+            lab.config(image=ph, width=tw, height=th)
+        else:
+            self.app.want_thumb(("video", v))
+        tk.Label(f, text=VideosPage.short_title(v)[:34], fg=TEXT, bg=BG, font=(FONT_SEMI, 9), anchor="w",
+                 wraplength=tw).pack(fill="x", pady=(6, 0))
+        page = "youtube" if v.get("fmt") == "wide" else "tiktok"
+        for w in [f] + list(f.winfo_children()):
+            w.bind("<Button-1>", lambda e, v=v, p=page: (self.app.show(p), self.app.select_video(v)))
+
+
+def _hero_px(im, x, y):
+    """Colour of the backdrop under a widget (so pill corners blend in)."""
+    try:
+        r, g, b = im.convert("RGB").getpixel((max(0, min(im.width - 1, x)), max(0, min(im.height - 1, y))))
+        return f"#{r:02x}{g:02x}{b:02x}"
+    except Exception:
+        return BG
 
 
 class ClipsPage(Page):
@@ -201,20 +425,15 @@ class ClipsPage(Page):
         super().__init__(app)
         button(self.head_right, "⟳  Refresh", app.reload, "normal", small=True).pack(side="right")
         bar = tk.Frame(self, bg=BG)
-        bar.pack(fill="x", padx=28, pady=(10, 8))
+        bar.pack(fill="x", padx=28, pady=(2, 10))
         self.filter = "All"
         self.fbtn = {}
         for f in self.FILTERS:
-            b = tk.Button(bar, text=f, relief="flat", bd=0, padx=14, pady=5, font=(FONT, 9, "bold"), cursor="hand2",
-                          command=lambda f=f: self.set_filter(f))
+            b = RoundButton(bar, f, lambda f=f: self.set_filter(f), kind="chip", small=True)
             b.pack(side="left", padx=(0, 6))
             self.fbtn[f] = b
-        sw = tk.Frame(bar, bg=CARD)
-        sw.pack(side="right")
-        tk.Label(sw, text="🔍", bg=CARD, fg=MUTED, font=(FONT, 10)).pack(side="left", padx=(10, 2))
         self.search = tk.StringVar()
-        tk.Entry(sw, textvariable=self.search, bg=CARD, fg=TEXT, insertbackground=TEXT, relief="flat",
-                 font=(FONT, 10), width=26).pack(side="left", ipady=6, padx=(0, 10))
+        search_box(bar, self.search, "Search operator, map or day").pack(side="right")
         self.search.trace_add("write", lambda *a: self.apply())
         self.count = tk.Label(bar, text="", fg=MUTED, bg=BG, font=(FONT, 9))
         self.count.pack(side="right", padx=12)
@@ -231,9 +450,7 @@ class ClipsPage(Page):
 
     def _paint(self):
         for f, b in self.fbtn.items():
-            on = f == self.filter
-            b.config(bg=ACCENT if on else CARD, fg="#ffffff" if on else TEXT,
-                     activebackground=ACCENT_HI if on else CARD_HI)
+            b.config(kind="chip_on" if f == self.filter else "chip")
 
     def apply(self):
         q = self.search.get().strip().lower()
@@ -274,16 +491,16 @@ class ClipsPage(Page):
         self.render()
 
     def _card(self, c, r, col):
-        f = tk.Frame(self.grid.inner, bg=CARD, cursor="hand2", highlightthickness=2, highlightbackground=BG,
+        f = tk.Frame(self.grid.inner, bg=BG, cursor="hand2", highlightthickness=2, highlightbackground=BG,
                      highlightcolor=ACCENT)
         f.grid(row=r, column=col, padx=6, pady=6, sticky="n")
-        img = tk.Label(f, bg="#07060a", width=304, height=171, bd=0)
-        img.pack()
+        img = tk.Label(f, bg=BG, width=304, height=171, bd=0)
+        img.pack(padx=3, pady=3)
         kind, op, mp = core.parts(c)
         name = " · ".join(x for x in (op, mp) if x) or ("Clip" if not kind else kind)
-        tk.Label(f, text=name, fg=TEXT, bg=CARD, font=(FONT, 10, "bold"), anchor="w").pack(fill="x", padx=10, pady=(8, 0))
-        tk.Label(f, text=core.clip_time(c).strftime("%a %b %d · %I:%M %p").replace(" 0", " "), fg=MUTED, bg=CARD,
-                 font=(FONT, 9), anchor="w").pack(fill="x", padx=10, pady=(0, 9))
+        tk.Label(f, text=name, fg=TEXT, bg=BG, font=(FONT_SEMI, 10), anchor="w").pack(fill="x", padx=6, pady=(4, 0))
+        tk.Label(f, text=core.clip_time(c).strftime("%a %b %d · %I:%M %p").replace(" 0", " "), fg=MUTED, bg=BG,
+                 font=(FONT, 9), anchor="w").pack(fill="x", padx=6, pady=(0, 8))
         widgets = [f] + list(f.winfo_children())
         for w in widgets:
             w.bind("<Button-1>", lambda e, c=c: self.app.select_clip(c))
@@ -359,18 +576,18 @@ class VideosPage(Page):
         size = (162, 288) if vertical else (304, 171)
         cols = self.grid.cols(size[0] + 16)
         for i, v in enumerate(vids[:120]):
-            f = tk.Frame(inner, bg=CARD, cursor="hand2", highlightthickness=2, highlightbackground=BG)
+            f = tk.Frame(inner, bg=BG, cursor="hand2", highlightthickness=2, highlightbackground=BG)
             f.grid(row=i // cols, column=i % cols, padx=6, pady=6, sticky="n")
-            img = tk.Label(f, bg="#07060a", width=size[0], height=size[1], bd=0)
-            img.pack()
-            tk.Label(f, text=self.short_title(v), fg=TEXT, bg=CARD, font=(FONT, 9, "bold"), anchor="w",
-                     wraplength=size[0] - 12, justify="left").pack(fill="x", padx=8, pady=(7, 0))
+            img = tk.Label(f, bg=BG, width=size[0], height=size[1], bd=0)
+            img.pack(padx=3, pady=3)
+            tk.Label(f, text=self.short_title(v), fg=TEXT, bg=BG, font=(FONT_SEMI, 9), anchor="w",
+                     wraplength=size[0] - 8, justify="left").pack(fill="x", padx=5, pady=(4, 0))
             when = v.get("made_at", "")[:16].replace("T", " ")
             try:
                 when = datetime.fromisoformat(v["made_at"]).strftime("%b %d · %I:%M %p").replace(" 0", " ")
             except Exception:
                 pass
-            tk.Label(f, text=when, fg=MUTED, bg=CARD, font=(FONT, 8), anchor="w").pack(fill="x", padx=8, pady=(0, 8))
+            tk.Label(f, text=when, fg=MUTED, bg=BG, font=(FONT, 8), anchor="w").pack(fill="x", padx=5, pady=(0, 8))
             for w in [f] + list(f.winfo_children()):
                 w.bind("<Button-1>", lambda e, v=v: self.app.select_video(v))
                 w.bind("<Enter>", lambda e, f=f: f.config(highlightbackground=LINE))
@@ -437,8 +654,7 @@ class YouTubePage(VideosPage):
         seg.pack(fill="x", padx=28, pady=(10, 0))
         self.segb = {}
         for key, text in (("wide", "▭  Widescreen"), ("vertical", "▯  Shorts")):
-            b = tk.Button(seg, text=text, relief="flat", bd=0, padx=16, pady=6, font=(FONT, 10, "bold"),
-                          cursor="hand2", command=lambda k=key: self.set_mode(k))
+            b = RoundButton(seg, text, lambda k=key: self.set_mode(k), kind="chip", small=True)
             b.pack(side="left", padx=(0, 6))
             self.segb[key] = b
         self.grid.pack(fill="both", expand=True, padx=(22, 6), pady=(12, 6))
@@ -461,9 +677,7 @@ class YouTubePage(VideosPage):
 
     def _paint(self):
         for k, b in self.segb.items():
-            on = k == self.mode
-            b.config(bg=ACCENT if on else CARD, fg="#ffffff" if on else TEXT,
-                     activebackground=ACCENT_HI if on else CARD_HI)
+            b.config(kind="chip_on" if k == self.mode else "chip")
 
     def open_folder(self):
         self.app.open_dir(self.app.s["youtube_dir"] if self.mode == "wide" else self.app.s["output_dir"])
@@ -498,9 +712,10 @@ class AutoPage(Page):
                                          ("wide", "YouTube widescreen  (16:9)"))):
             v = tk.BooleanVar(value=key in app.s.get("auto_formats", []))
             self.fv[key] = v
-            tk.Checkbutton(opts, text=text, variable=v, command=self.save_formats, bg=BG, fg=TEXT, selectcolor=CARD,
-                           activebackground=BG, activeforeground=TEXT, font=(FONT, 10)).grid(
-                row=1, column=i, sticky="w", padx=(0, 24), pady=6)
+            cell = tk.Frame(opts, bg=BG)
+            cell.grid(row=1, column=i, sticky="w", padx=(0, 28), pady=8)
+            Toggle(cell, v, command=self.save_formats, bg=BG).pack(side="left")
+            tk.Label(cell, text="  " + text, fg=TEXT, bg=BG, font=(FONT, 10)).pack(side="left")
         tk.Label(opts, text="When I get", fg=MUTED, bg=BG, font=(FONT, 10)).grid(row=2, column=0, sticky="w", pady=6)
         self.mk = tk.StringVar(value={3: "3K or better", 4: "4K or better", 5: "Aces only"}.get(app.s["min_kills"], "3K or better"))
         om = tk.OptionMenu(opts, self.mk, "3K or better", "4K or better", "Aces only", command=lambda *_: self.save_opts())
@@ -668,10 +883,86 @@ class SettingsPage(Page):
             self.app.reload()
 
 
+# ---------------------------------------------------------------- sidebar widgets
+class NavItem(tk.Canvas):
+    W, H = 206, 42
+
+    def __init__(self, master, icon, text, command):
+        super().__init__(master, width=self.W, height=self.H, bg=SIDE, highlightthickness=0, bd=0, cursor="hand2")
+        self.icon, self.text, self.command = icon, text, command
+        self.active = self.hover = False
+        self._imgs = {}
+        self.bind("<Enter>", lambda e: self._h(True))
+        self.bind("<Leave>", lambda e: self._h(False))
+        self.bind("<ButtonRelease-1>", lambda e: self.command())
+        self._draw()
+
+    def _h(self, on):
+        self.hover = on
+        self._draw()
+
+    def set_active(self, on):
+        self.active = on
+        self._draw()
+
+    def _draw(self):
+        key = "a" if self.active else ("h" if self.hover else "n")
+        if key not in self._imgs:
+            im = Image.new("RGBA", (self.W, self.H), ui.rgb(SIDE) + (255,))
+            if key != "n":
+                im.alpha_composite(ui.rounded_rect(self.W, self.H, 12, "#1c1626" if key == "a" else "#130f1a"))
+            if key == "a":
+                im.alpha_composite(ui.rounded_rect(4, 20, 2, ACCENT), (0, 11))
+            self._imgs[key] = ImageTk.PhotoImage(im)
+        self.delete("all")
+        self.create_image(0, 0, image=self._imgs[key], anchor="nw")
+        col = TEXT if (self.active or self.hover) else MUTED
+        self.create_text(28, self.H // 2, text=self.icon, fill=ACCENT if self.active else col, font=(FONT, 12))
+        self.create_text(54, self.H // 2, text=self.text, fill=col, font=(FONT_SEMI, 11), anchor="w")
+
+
+class ProfileChip(tk.Canvas):
+    W, H = 206, 52
+
+    def __init__(self, master, app):
+        super().__init__(master, width=self.W, height=self.H, bg=SIDE, highlightthickness=0, bd=0, cursor="hand2")
+        self.app = app
+        self.hover = False
+        self.bind("<Enter>", lambda e: self._h(True))
+        self.bind("<Leave>", lambda e: self._h(False))
+        self.bind("<ButtonRelease-1>", lambda e: app.account_menu(e.x_root, e.y_root - 150))
+        self.redraw()
+
+    def _h(self, on):
+        self.hover = on
+        self.redraw()
+
+    def redraw(self):
+        im = Image.new("RGBA", (self.W, self.H), ui.rgb(SIDE) + (255,))
+        if self.hover:
+            im.alpha_composite(ui.rounded_rect(self.W, self.H, 12, "#130f1a"))
+        av = self.app.avatar_image(36, bg="#130f1a" if self.hover else SIDE)
+        im.alpha_composite(av.convert("RGBA"), (8, 8))
+        self._img = ImageTk.PhotoImage(im)
+        self.delete("all")
+        self.create_image(0, 0, image=self._img, anchor="nw")
+        u = self.app.user
+        name = (u or {}).get("name") or "Guest"
+        sub = ("Online" if self.app.online else "Offline") if u else "Not signed in"
+        self.create_text(54, 18, text=name[:18], fill=TEXT, font=(FONT_SEMI, 10), anchor="w")
+        self.create_oval(54, 31, 60, 37, fill=GOOD if (u and self.app.online) else DIM, width=0)
+        self.create_text(65, 34, text=sub, fill=MUTED, font=(FONT, 8), anchor="w")
+        self.create_text(self.W - 14, 26, text="⋯", fill=MUTED, font=(FONT, 12))
+
+
 # ---------------------------------------------------------------- the app
 class App:
-    def __init__(self, root):
+    def __init__(self, root, session=None, online=True):
         self.root = root
+        self.session = session
+        self.online = online
+        self.user = auth.user_info(session) if session else None
+        self._avatar_src = None
         root.title(core.APP_NAME)
         root.configure(bg=BG)
         root.geometry("1440x880")
@@ -701,14 +992,22 @@ class App:
         self.watching = False
         self.activity = []
         self.patch = None
+        if self.user and not self.s.get("onboarded"):
+            # signed in with Discord: use their name for the intro and find Medal automatically
+            self.s["creator"] = self.s.get("creator") or self.user["name"]
+            self.s["medal_dir"] = core.find_medal_dir()
+            self.s["onboarded"] = os.path.isdir(os.path.join(self.s["medal_dir"], "Databases"))
+            core.save_settings(self.s)
         self._build()
         threading.Thread(target=self._job_worker, daemon=True).start()
         threading.Thread(target=self._thumb_worker, daemon=True).start()
         self.root.after(100, self._pump)
         self.root.bind_all("<MouseWheel>", self._wheel)
-        self.show("clips")
+        self.show("home")
         self.reload()
         threading.Thread(target=self._check_update, daemon=True).start()
+        if self.session:
+            threading.Thread(target=self._sync_profile, daemon=True).start()
         if not self.s.get("onboarded"):
             self.root.after(400, self.onboarding)
 
@@ -717,35 +1016,30 @@ class App:
         side = tk.Frame(self.root, bg=SIDE, width=230)
         side.pack(side="left", fill="y")
         side.pack_propagate(False)
+        self.side = side
         wm = os.path.join(core.ASSETS, "breachcut_wordmark.png")
         if os.path.exists(wm):
             im = Image.open(wm)
-            im = im.resize((int(im.width * 34 / im.height), 34), Image.LANCZOS)
+            im = im.resize((int(im.width * 30 / im.height), 30), Image.LANCZOS)
             self._wm = ImageTk.PhotoImage(im)
-            tk.Label(side, image=self._wm, bg=SIDE).pack(anchor="w", padx=20, pady=(24, 26))
+            tk.Label(side, image=self._wm, bg=SIDE).pack(anchor="w", padx=22, pady=(26, 30))
         else:
-            tk.Label(side, text="BREACHCUT", fg=TEXT, bg=SIDE, font=(FONT, 17, "bold")).pack(anchor="w", padx=20, pady=(24, 26))
+            tk.Label(side, text="BREACHCUT", fg=TEXT, bg=SIDE, font=(FONT_BOLD, 16)).pack(anchor="w", padx=22, pady=(26, 30))
+        tk.Label(side, text="MENU", fg=DIM, bg=SIDE, font=(FONT_SEMI, 8)).pack(anchor="w", padx=26, pady=(0, 6))
         self.nav = {}
-        for key, icon, text in (("clips", "🎬", "Clips"), ("tiktok", "📱", "TikTok"), ("youtube", "▶", "YouTube"),
-                                ("auto", "⚡", "Auto-clip"), ("settings", "⚙", "Settings")):
-            row = tk.Frame(side, bg=SIDE, cursor="hand2")
-            row.pack(fill="x", pady=1)
-            bar = tk.Frame(row, bg=SIDE, width=4)
-            bar.pack(side="left", fill="y")
-            lab = tk.Label(row, text=f"  {icon}   {text}", fg=MUTED, bg=SIDE, font=(FONT, 11, "bold"), anchor="w",
-                           pady=10)
-            lab.pack(side="left", fill="x", expand=True, padx=(12, 12))
-            for w in (row, lab):
-                w.bind("<Button-1>", lambda e, k=key: self.show(k))
-                w.bind("<Enter>", lambda e, k=key: self._nav_hover(k, True))
-                w.bind("<Leave>", lambda e, k=key: self._nav_hover(k, False))
-            self.nav[key] = (row, bar, lab)
+        for key, icon, text in (("home", "⌂", "Home"), ("clips", "🎬", "Clips"), ("tiktok", "📱", "TikTok"),
+                                ("youtube", "▶", "YouTube"), ("auto", "⚡", "Auto-clip"), ("settings", "⚙", "Settings")):
+            item = NavItem(side, icon, text, lambda k=key: self.show(k))
+            item.pack(fill="x", padx=12, pady=1)
+            self.nav[key] = item
         bottom = tk.Frame(side, bg=SIDE)
-        bottom.pack(side="bottom", fill="x", padx=16, pady=16)
-        self.auto_pill = tk.Label(bottom, text="", font=(FONT, 9, "bold"), cursor="hand2", padx=10, pady=6)
+        bottom.pack(side="bottom", fill="x", padx=12, pady=14)
+        self.auto_pill = tk.Canvas(bottom, width=206, height=40, bg=SIDE, highlightthickness=0, bd=0, cursor="hand2")
         self.auto_pill.pack(fill="x")
-        self.auto_pill.bind("<Button-1>", lambda e: self.toggle_auto())
-        tk.Label(bottom, text=f"v{updater.local_version()}", fg=DIM, bg=SIDE, font=(FONT, 8)).pack(anchor="w", pady=(10, 0))
+        self.auto_pill.bind("<ButtonRelease-1>", lambda e: self.toggle_auto())
+        tk.Frame(bottom, bg=LINE, height=1).pack(fill="x", pady=12)
+        self.profile = ProfileChip(bottom, self)
+        self.profile.pack(fill="x")
         self._paint_pill()
 
         # viewer panel (right)
@@ -772,8 +1066,8 @@ class App:
         self.banner = tk.Frame(self.main, bg=ACCENT)
         self.statusbar = tk.Label(self.main, text="", fg=MUTED, bg=BG, font=(FONT, 9), anchor="w")
         self.statusbar.pack(side="bottom", fill="x", padx=28, pady=(0, 10))
-        self.pages = {"clips": ClipsPage(self), "tiktok": TikTokPage(self), "youtube": YouTubePage(self),
-                      "auto": AutoPage(self), "settings": SettingsPage(self)}
+        self.pages = {"home": HomePage(self), "clips": ClipsPage(self), "tiktok": TikTokPage(self),
+                      "youtube": YouTubePage(self), "auto": AutoPage(self), "settings": SettingsPage(self)}
         self.current = None
 
     def _wheel(self, e):
@@ -784,32 +1078,28 @@ class App:
                 return
             w = getattr(w, "master", None)
 
-    def _nav_hover(self, key, on):
-        if key == self.current:
-            return
-        row, bar, lab = self.nav[key]
-        c = "#120f19" if on else SIDE
-        for w in (row, lab):
-            w.config(bg=c)
-        lab.config(fg=TEXT if on else MUTED)
-
     def show(self, key):
         if self.current:
             self.pages[self.current].pack_forget()
         self.current = key
         self.pages[key].pack(fill="both", expand=True)
-        for k, (row, bar, lab) in self.nav.items():
-            on = k == key
-            for w in (row, lab):
-                w.config(bg="#1a1422" if on else SIDE)
-            bar.config(bg=ACCENT if on else SIDE)
-            lab.config(fg=TEXT if on else MUTED)
+        for k, item in self.nav.items():
+            item.set_active(k == key)
         self.pages[key].on_show()
 
     def _paint_pill(self):
         on = self.watching
-        self.auto_pill.config(text="●  Auto-clip ON" if on else "○  Auto-clip off", bg="#14301f" if on else CARD,
-                              fg=GOOD if on else MUTED)
+        c = self.auto_pill
+        im = Image.new("RGBA", (206, 40), ui.rgb(SIDE) + (255,))
+        im.alpha_composite(ui.rounded_rect(206, 40, 12, "#11291c" if on else CARD, outline="#1f5a3a" if on else LINE,
+                                           width=1))
+        c._img = ImageTk.PhotoImage(im)
+        c.delete("all")
+        c.create_image(0, 0, image=c._img, anchor="nw")
+        c.create_oval(16, 16, 24, 24, fill=GOOD if on else DIM, width=0)
+        c.create_text(34, 20, text="Auto-clip is on" if on else "Auto-clip is off", fill=GOOD if on else MUTED,
+                      font=(FONT_SEMI, 9), anchor="w")
+        c.create_text(192, 20, text="ON" if on else "OFF", fill=GOOD if on else DIM, font=(FONT_SEMI, 8), anchor="e")
 
     def status(self, text, log=False):
         self.statusbar.config(text=text)
@@ -1001,6 +1291,79 @@ class App:
             self.jobs.put(("scan", since))
             self.status(f"Looking for highlights from the last {days} day(s)…", log=True)
 
+    # ---------------------------------------------------------------- account
+    def avatar_image(self, size, ring=None, bg=None):
+        """Round avatar (Discord picture, or a letter) as a PIL image."""
+        try:
+            if self._avatar_src is None and self.user:
+                p = auth.avatar_path(self.user)
+                self._avatar_src = Image.open(p).convert("RGB") if p else False
+            src = self._avatar_src or ui.letter_avatar((self.user or {}).get("name") or self.s.get("creator") or "B", 256)
+            return ui.circle(src, size, ring=ring, bg=bg or SIDE)
+        except Exception:
+            return ui.circle(ui.letter_avatar("B", 256), size, ring=ring, bg=bg or SIDE)
+
+    def _sync_profile(self):
+        # warm the avatar cache, then tell the server we're active (best effort)
+        try:
+            auth.avatar_path(self.user)
+            self.q.put(("profile", None))
+        except Exception:
+            pass
+        if self.online:
+            auth.upsert_profile(self.session, app_version=updater.local_version(), age_confirmed=True)
+
+    def account_menu(self, x, y):
+        m = tk.Menu(self.root, tearoff=0, bg=PANEL, fg=TEXT, activebackground=CARD_HI, activeforeground=TEXT,
+                    bd=0, relief="flat", font=(FONT, 10))
+        if self.user:
+            m.add_command(label=f"Signed in as {self.user['name']}", state="disabled")
+            m.add_separator()
+        m.add_command(label="  Settings", command=lambda: self.show("settings"))
+        m.add_command(label="  Check for updates", command=self.manual_update_check)
+        m.add_command(label="  Privacy policy", command=lambda: __import__("webbrowser").open(auth.PRIVACY_URL))
+        m.add_separator()
+        if self.user:
+            m.add_command(label="  Sign out", command=self.sign_out)
+        else:
+            m.add_command(label="  Sign in with Discord", command=self.restart_to_login)
+        try:
+            m.tk_popup(x, y)
+        finally:
+            m.grab_release()
+
+    def sign_out(self):
+        if not messagebox.askyesno(core.APP_NAME, "Sign out of Breachcut?\n\nYour clips and videos stay on this PC.",
+                                   parent=self.root):
+            return
+        auth.sign_out(self.session)
+        self.restart_to_login()
+
+    def restart_to_login(self):
+        self.player.stop()
+        updater.restart()
+        self.root.destroy()
+
+    def ready_highlights(self):
+        """Recent (2 weeks) 3K+ clips that haven't been made into anything yet (newest first)."""
+        out = []
+        cutoff = datetime.now() - timedelta(days=14)
+        for c in self.clips:
+            if (c["top"] >= max(3, int(self.s.get("min_kills", 3))) and not self.made_any(c)
+                    and core.clip_time(c) >= cutoff):
+                out.append(c)
+        return out[:24]
+
+    def make_all(self, clips):
+        fmts = self.s.get("auto_formats") or ["vertical"]
+        n = 0
+        for c in clips:
+            for f in fmts:
+                self.jobs.put(("one", (c, f)))
+                n += 1
+        self.status(f"Queued {n} edit{'s' if n != 1 else ''} — they'll appear in TikTok / YouTube as they finish.",
+                    log=True)
+
     # ---------------------------------------------------------------- onboarding
     def onboarding(self):
         w = tk.Toplevel(self.root, bg=PANEL)
@@ -1139,6 +1502,8 @@ class App:
                     self.clips_msg = "No Siege clips in Medal yet." if not val else ""
                     self.status(f"{len(val)} Siege clips from Medal.")
                     self.pages["clips"].apply()
+                    if self.current == "home":
+                        self.pages["home"].render()
                 elif kind == "noclips":
                     self.clips = []
                     self.clips_msg = (f"Couldn't find Medal's clips.\n{val}\n\n"
@@ -1169,6 +1534,11 @@ class App:
                             self.pages["clips"].set_thumb(cid, tp)
                 elif kind == "reload":
                     self.reload()
+                elif kind == "profile":
+                    self._avatar_src = None
+                    self.profile.redraw()
+                    if self.current == "home":
+                        self.pages["home"].render()
                 elif kind == "patch":
                     self._show_patch(val)
                 elif kind == "patched":
@@ -1187,7 +1557,18 @@ class App:
 
 def main():
     root = tk.Tk()
-    App(root)
+    root.title(core.APP_NAME)
+    root.configure(bg=BG)
+
+    def ready(session, online):
+        App(root, session, online)
+        root.deiconify()
+        try:
+            root.lift()
+            root.focus_force()
+        except tk.TclError:
+            pass
+    login.launch(root, ready)
     root.mainloop()
 
 
