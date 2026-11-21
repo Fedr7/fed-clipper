@@ -1,12 +1,10 @@
 {
-  "version": "1.2.0",
-  "notes": "Fed Clipper is now Breachcut — new look, TikTok + YouTube tabs, widescreen videos",
+  "version": "1.3.0",
+  "notes": "Sign in with Discord, all-new home screen and polished look",
   "files": [
-    "breachcut.py",
-    "autoclip_core.py",
-    "editor.py",
-    "player.py",
-    "updater.py",
-    "fed_clipper.py"
+    "ui_kit.py",
+    "auth.py",
+    "login.py",
+    "breachcut.py"
   ]
 }
