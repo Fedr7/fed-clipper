@@ -61,6 +61,20 @@ class Player(tk.Frame):
         self.bind("<Destroy>", lambda e: self.stop() if e.widget is self else None)
 
     # ---------------------------------------------------------------- public
+    def resize(self, w, h):
+        """Change the video box size (e.g. 16:9 clips vs 9:16 TikToks)."""
+        if (w, h) == (self.w, self.h):
+            return
+        self.stop()
+        self.w, self.h = w, h
+        self._blank()
+
+    def unload(self):
+        self.stop()
+        self.src = None
+        self._blank()
+        self.tlabel.config(text="0:00.0 / 0:00.0")
+
     def load(self, path, start=0.0, dur=None, play=False):
         self.stop()
         self.src = path
