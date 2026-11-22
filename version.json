@@ -1,9 +1,13 @@
 {
-  "version": "1.4.0",
-  "notes": "All-new Settings (video, audio, hotkeys, storage and more) and Breachcut's own video library",
+  "version": "1.5.0",
+  "notes": "Super easy editor: drag to trim, split, one-click looks, Undo. Plus the new Settings and your own video library.",
   "files": [
+    "editor.py",
     "settings_page.py",
     "autoclip_core.py",
-    "breachcut.py"
+    "breachcut.py",
+    "ui_kit.py",
+    "auth.py",
+    "login.py"
   ]
 }
