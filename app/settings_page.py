@@ -248,6 +248,8 @@ def make_settings_page(Page, ScrollGrid):
             core.save_settings(self.s)
             core.apply_settings(self.s, self.app.enc)
             self.app.status(f"✓ {msg}")
+            if hasattr(self.app, "settings_changed"):
+                self.app.settings_changed(key)
 
         def heading(self, text, sub=""):
             tk.Label(self.body, text=text, fg=TEXT, bg=BG, font=(FONT_BOLD, 16)).pack(anchor="w", pady=(6, 0))
@@ -549,10 +551,11 @@ def make_settings_page(Page, ScrollGrid):
 
         def _video(self):
             self.heading("Video", "Recording quality for the built-in recorder.")
-            self.soon()
             c = self.card("Replay buffer")
-            self.toggle(c, "rec_replay_on", "Keep a replay buffer",
-                        "Always holds the last moments so a hotkey can save them as a clip.")
+            self.choice(c, "rec_mode", "Record when", ["siege", "always", "off"],
+                        "The replay buffer keeps the last moments so your clip hotkey can save them.",
+                        shown={"siege": "Siege is running", "always": "Breachcut is open", "off": "Only when I press record"},
+                        width=230)
             self.choice(c, "replay_seconds", "Clip length", [15, 30, 60, 120, 300],
                         "How much is saved when you press the clip hotkey.",
                         shown={15: "15 seconds", 30: "30 seconds", 60: "1 minute", 120: "2 minutes", 300: "5 minutes"})
@@ -568,9 +571,9 @@ def make_settings_page(Page, ScrollGrid):
 
         def _audio(self):
             self.heading("Audio", "What the recorder captures.")
-            self.soon()
             c = self.card("Game")
-            self.toggle(c, "rec_game_audio", "Record game audio")
+            self.toggle(c, "rec_game_audio", "Record game & PC sound",
+                        "Everything you hear: the game, Discord, music.")
             self.slider(c, "rec_game_vol", "Game volume", 0, 150, suffix="%")
             c = self.card("Microphone")
             self.toggle(c, "rec_mic", "Record my microphone")
@@ -579,7 +582,6 @@ def make_settings_page(Page, ScrollGrid):
                           lambda v: self.save("mic_device", v), width=260, bg=CARD)
             dd.pack()
             self.slider(c, "mic_vol", "Mic volume", 0, 200, suffix="%")
-            self.toggle(c, "push_to_talk", "Push to talk", "Only record the mic while the push-to-talk hotkey is held.")
             c = self.card("Tracks")
             self.toggle(c, "separate_tracks", "Separate audio tracks",
                         "Keep game and mic on their own tracks so you can mute one later.")
@@ -601,15 +603,15 @@ def make_settings_page(Page, ScrollGrid):
 
         def _hotkeys(self):
             self.heading("Hotkeys", "Click a key, then press the new one. Esc cancels, Backspace clears.")
-            self.soon()
             c = self.card()
-            for key, label, help_text in (("hk_clip", "Save a clip", "Saves the replay buffer."),
-                                          ("hk_record", "Start / stop recording", "Records until you press it again."),
-                                          ("hk_bookmark", "Bookmark a moment", "Marks the moment so it's easy to find."),
-                                          ("hk_ptt", "Push to talk", "Hold to record your mic (if push to talk is on).")):
+            for key, label, help_text in (("hk_clip", "Save a clip", "Saves the last moments from the replay buffer."),
+                                          ("hk_record", "Start / stop recording", "Records until you press it again.")):
                 right = self.row(c, label, help_text)
-                HotkeyButton(right, self.s.get(key) or "None", lambda v, key=key: self.save(key, v, f"{label} → {v}"),
-                             bg=CARD).pack()
+                HotkeyButton(right, self.s.get(key) or "None",
+                             lambda v, key=key, label=label: self.save(key, v, f"{label} → {v}"), bg=CARD).pack()
+            tk.Label(self.body, text="Tip: Medal uses F8 to clip. If Medal is running too, keep these on different keys "
+                                     "so one press doesn't save two clips.", fg=MUTED, bg=BG, font=(FONT, 9),
+                     wraplength=640, justify="left").pack(anchor="w", pady=(4, 0))
             tk.Label(self.body, text="Hotkeys use Windows' normal hotkey system — Breachcut never reads the game, "
                                      "so it's safe with BattlEye.", fg=DIM, bg=BG, font=(FONT, 9)).pack(anchor="w",
                                                                                                      pady=6)
