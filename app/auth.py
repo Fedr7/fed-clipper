@@ -197,6 +197,26 @@ def upsert_profile(sess, **fields):
         return False
 
 
+def send_bug_report(sess, message, app_version="", log_tail="", os_name=""):
+    """File a bug report. Returns (ok, message for the user)."""
+    if not sess:
+        return False, "Sign in with Discord first, or report it in our Discord."
+    info = user_info(sess)
+    row = {"user_id": info["id"], "username": info["name"], "app_version": app_version,
+           "os": os_name[:120], "message": message[:4000], "log_tail": (log_tail or "")[-20000:]}
+    try:
+        _req("POST", "/rest/v1/bug_reports", row, token=sess["access_token"],
+             extra_headers={"Prefer": "return=minimal"}, timeout=15)
+        return True, "Thanks! Your report was sent."
+    except ConnectionError:
+        return False, "Couldn't reach the server. Check your internet and try again."
+    except AuthError as e:
+        m = str(e)
+        if "Too many" in m:
+            return False, "You've sent a lot of reports this hour. Try again later."
+        return False, "Couldn't send the report: " + m[:160]
+
+
 # ---------------------------------------------------------------- Discord sign-in
 PAGE = """<!doctype html><html><head><meta charset="utf-8"><title>Breachcut</title><style>
 html,body{{margin:0;height:100%;background:#0b0910;color:#f4f1fb;font-family:'Segoe UI',system-ui,sans-serif}}
