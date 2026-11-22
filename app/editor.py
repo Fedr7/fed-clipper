@@ -59,12 +59,12 @@ class Editor(tk.Toplevel):
                 pass
         self.edits = core.load_edits()
         mine = self.edits.get(clip["id"]) or {}
+        self.dur = float(clip.get("dur") or core.probe_duration(clip["path"]) or 60.0)
         self.segs = [list(x) for x in mine.get("segments") or self.auto_segs()]
         self.segs.sort()
         self.style = dict(core.DEFAULT_STYLE)
         self.style.update(app.s.get("style") or {})
         self.style.update(mine.get("style") or {})
-        self.dur = float(clip.get("dur") or core.probe_duration(clip["path"]) or 60.0)
         self.sel = 0
         self.busy = False
         self.mode = "edit"           # edit | preview
@@ -83,6 +83,8 @@ class Editor(tk.Toplevel):
         self.say("Drag the edges of a pink block to trim it. Space plays, S splits, Delete removes.")
 
     def auto_segs(self):
+        if not self.c.get("kills"):          # your own recordings: start with the whole thing
+            return [[0.0, round(max(1.0, self.dur - 0.05), 2)]]
         return [[round(s, 2), round(e, 2)] for _, s, e in core.clip_segments(self.c)] or [[0.0, 5.0]]
 
     # ================================================================== layout
