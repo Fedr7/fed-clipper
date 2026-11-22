@@ -22,10 +22,12 @@ from collections import deque
 from datetime import datetime
 
 import autoclip_core as core
+import killfeed
 
 SEG = 2                                   # seconds per piece
 SCRATCH = os.path.join(core.APP_DIR, "replay")
 GAME_EXES = ("rainbowsix.exe", "rainbowsix_vulkan.exe", "rainbowsix_be.exe")
+VENDORS = {"NVIDIA": "nvenc", "AMD": "amf", "Intel": "qsv"}
 ENCODER_IDS = {"NVIDIA": "h264_nvenc", "AMD": "h264_amf", "Intel": "h264_qsv", "CPU": "libx264"}
 _enc_cache = {}
 
@@ -72,39 +74,66 @@ def encoder_works(codec):
     ff = core.find_ffmpeg()
     ok = False
     if ff:
-        fmt = "bgra" if codec == "h264_nvenc" else "nv12"
-        r = subprocess.run([ff, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
-                            "color=black:s=256x256:r=30:d=0.2", "-vf", f"format={fmt}", "-c:v", codec, "-f", "null", "-"],
-                           capture_output=True, text=True, creationflags=core.NO_WINDOW, timeout=30)
-        ok = r.returncode == 0
+        fmt = "bgra" if codec.endswith("nvenc") else "nv12"
+        try:
+            r = subprocess.run([ff, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                                "color=black:s=256x256:r=30:d=0.2", "-vf", f"format={fmt}", "-c:v", codec, "-f", "null",
+                                "-"], capture_output=True, text=True, creationflags=core.NO_WINDOW, timeout=30)
+            ok = r.returncode == 0
+        except Exception:
+            ok = False
     _enc_cache[codec] = ok
     return ok
 
 
-def pick_encoder(pref):
-    order = [ENCODER_IDS[pref]] if pref in ENCODER_IDS else []
-    order += ["h264_nvenc", "h264_amf", "h264_qsv"]
+def family(fmt_name):
+    return "hevc" if str(fmt_name).upper() in ("HEVC", "H.265", "H265") else "h264"
+
+
+def pick_encoder(pref, fmt_name="H.264"):
+    fam = family(fmt_name)
+    cpu = "libx265" if fam == "hevc" else "libx264"
+    if pref == "CPU":
+        return cpu
+    order = [f"{fam}_{VENDORS[pref]}"] if pref in VENDORS else []
+    order += [f"{fam}_{v}" for v in VENDORS.values()]
     for c in order:
-        if c != "libx264" and encoder_works(c):
+        if encoder_works(c):
             return c
-    return "libx264"
+    if fam == "hevc":                       # no HEVC on this card: fall back to H.264 on the card
+        return pick_encoder(pref, "H.264")
+    return cpu
 
 
 def encoder_name(codec):
-    return {v: k for k, v in ENCODER_IDS.items()}.get(codec, codec)
+    for k, v in VENDORS.items():
+        if codec.endswith(v):
+            return k
+    return "CPU"
 
 
-def video_args(codec, mbps, fps):
-    b = [f"{mbps}M"]
-    common = ["-b:v", b[0], "-maxrate", b[0], "-bufsize", f"{mbps * 2}M", "-g", str(fps * SEG),
-              "-force_key_frames", f"expr:gte(t,n_forced*{SEG})"]
-    if codec == "h264_nvenc":
-        return ["-c:v", codec, "-preset", "p4", "-tune", "hq", "-rc", "cbr"] + common
-    if codec == "h264_amf":
-        return ["-c:v", codec, "-quality", "speed", "-rc", "cbr"] + common
-    if codec == "h264_qsv":
-        return ["-c:v", codec, "-preset", "veryfast"] + common
-    return ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p"] + common
+PRESETS = {  # Breachcut name -> (nvenc, amf, qsv, x264)
+    "Performance": ("p1", "speed", "veryfast", "ultrafast"),
+    "Balanced": ("p4", "balanced", "medium", "veryfast"),
+    "Quality": ("p6", "quality", "slow", "fast"),
+}
+
+
+def video_args(codec, mbps, fps, preset="Balanced", rc="CBR", keyint=SEG):
+    b = f"{mbps}M"
+    nv, amf, qsv, x = PRESETS.get(preset, PRESETS["Balanced"])
+    if rc == "VBR":
+        rate = ["-b:v", b, "-maxrate", f"{int(mbps * 1.5)}M", "-bufsize", f"{mbps * 2}M"]
+    else:
+        rate = ["-b:v", b, "-maxrate", b, "-bufsize", f"{mbps * 2}M"]
+    common = rate + ["-g", str(fps * keyint), "-force_key_frames", f"expr:gte(t,n_forced*{SEG})"]
+    if codec.endswith("nvenc"):
+        return ["-c:v", codec, "-preset", nv, "-tune", "hq", "-rc", "vbr" if rc == "VBR" else "cbr"] + common
+    if codec.endswith("amf"):
+        return ["-c:v", codec, "-quality", amf, "-rc", "vbr_peak" if rc == "VBR" else "cbr"] + common
+    if codec.endswith("qsv"):
+        return ["-c:v", codec, "-preset", qsv] + common
+    return ["-c:v", codec, "-preset", x, "-pix_fmt", "yuv420p"] + common
 
 
 def mic_name(setting):
@@ -145,6 +174,15 @@ class Loopback:
                 py = alt
         r = subprocess.run([py, "-m", "pip", "install", "--user", "--quiet", "--disable-pip-version-check",
                             "PyAudioWPatch"], capture_output=True, text=True, creationflags=core.NO_WINDOW, timeout=300)
+        try:
+            import importlib
+            import site
+            user = site.getusersitepackages()
+            if user and user not in sys.path:
+                sys.path.append(user)
+            importlib.invalidate_caches()
+        except Exception:
+            pass
         return r.returncode == 0
 
     def open(self):
@@ -244,27 +282,37 @@ class Recorder:
         self.lock = threading.Lock()
         self.saving = False
         self.last_error = ""
+        self.detect = False
+        self.kills = []              # kill times (seconds since the buffer started) seen this session
+        self.kf = None
+        self.auto_done_until = -1.0  # kills up to here were already handled by auto-clip
 
     # ---------------------------------------------------------------- build the FFmpeg command
     def build(self, ff, loop_rate=None, loop_ch=None, mic=None):
         s = self.s
         fps = int(s.get("rec_fps") or 60)
         mbps = int(s.get("rec_bitrate") or 20)
-        self.codec = self.codec or pick_encoder(s.get("rec_encoder", "Auto"))
+        self.codec = self.codec or pick_encoder(s.get("rec_encoder", "Auto"), s.get("rec_codec", "H.264"))
         cmd = [ff, "-hide_banner", "-loglevel", "error", "-y"]
         vf = []
+        mouse = 1 if s.get("rec_cursor") else 0
+        mon = max(0, int(s.get("rec_monitor", 0) or 0))
+        method = s.get("rec_capture", "Auto")
         if self.video_source:
             cmd += self.video_source
-        elif has_filter("ddagrab"):
-            cmd += ["-f", "lavfi", "-i", f"ddagrab=output_idx=0:framerate={fps}:draw_mouse=0"]
+        elif method != "Compatibility" and has_filter("ddagrab"):
+            cmd += ["-f", "lavfi", "-i", f"ddagrab=output_idx={mon}:framerate={fps}:draw_mouse={mouse}"]
             vf.append("hwdownload,format=bgra")
         else:
-            cmd += ["-f", "gdigrab", "-framerate", str(fps), "-draw_mouse", "0", "-i", "desktop"]
-        res = {"1440p": 1440, "1080p": 1080, "720p": 720}.get(s.get("rec_resolution"))
+            cmd += ["-f", "gdigrab", "-framerate", str(fps), "-draw_mouse", str(mouse), "-i", "desktop"]
+        res = {"2160p": 2160, "1440p": 1440, "1080p": 1080, "900p": 900, "720p": 720, "480p": 480}.get(
+            s.get("rec_resolution"))
+        enc_vf = []
         if res:
-            vf.append(f"scale=-2:'min(ih,{res})':flags=bicubic")
-        if self.codec != "h264_nvenc":
-            vf.append("format=nv12" if self.codec in ("h264_amf", "h264_qsv") else "format=yuv420p")
+            enc_vf.append(f"scale=-2:'min(ih,{res})':flags=bicubic")
+        if not self.codec.endswith("nvenc"):
+            enc_vf.append("format=nv12" if any(x in self.codec for x in ("amf", "qsv")) else "format=yuv420p")
+        self.detect = bool(s.get("kill_detect", True)) and not s.get("_no_detect")
         n = 1
         g_in = m_in = None
         if loop_rate:
@@ -273,16 +321,31 @@ class Recorder:
         if mic:
             cmd += ["-thread_queue_size", "4096", "-f", "dshow", "-audio_buffer_size", "50", "-i", f"audio={mic}"]
             m_in, n = n, n + 1
-        fc = [f"[0:v]{','.join(vf) if vf else 'null'}[v]"]
+        base = ",".join(vf) if vf else "null"
+        if self.detect:
+            # one copy goes to the encoder, a tiny strip goes to the kill detector (no extra screen capture)
+            fc = [f"[0:v]{base},split=2[vv][dd]",
+                  f"[vv]{','.join(enc_vf) if enc_vf else 'null'}[v]",
+                  f"[dd]{killfeed.ffmpeg_filter()}[d]"]
+        else:
+            fc = [f"[0:v]{','.join([base] + enc_vf)}[v]"]
         gv = max(0, int(s.get("rec_game_vol", 100))) / 100
         mv = max(0, int(s.get("mic_vol", 100))) / 100
         if g_in is not None:
             fc.append(f"[{g_in}:a]aresample=48000,aformat=channel_layouts=stereo,volume={gv}[g]")
         if m_in is not None:
-            fc.append(f"[{m_in}:a]aresample=48000:async=1,aformat=channel_layouts=stereo,volume={mv}[m]")
+            mf = ["aresample=48000:async=1"]
+            if s.get("mic_noise"):
+                mf.append("afftdn=nf=-25")
+            if s.get("mic_gate"):
+                mf.append("agate=threshold=0.02:ratio=4:attack=5:release=200")
+            mf.append("aformat=channel_layouts=stereo" if not s.get("mic_mono", True) else
+                      "pan=mono|c0=0.5*c0+0.5*c1,aformat=channel_layouts=stereo")
+            mf.append(f"volume={mv}")
+            fc.append(f"[{m_in}:a]{','.join(mf)}[m]")
         maps = ["-map", "[v]"]
         if g_in is not None and m_in is not None:
-            # track 1 = everything mixed, track 2 = game only, track 3 = mic only (same layout as Medal)
+            # track 1 = everything mixed, track 2 = game only, track 3 = mic only
             sep = bool(s.get("separate_tracks", True))
             if sep:
                 fc.append("[g]asplit[g1][g2]")
@@ -297,10 +360,13 @@ class Recorder:
         elif m_in is not None:
             maps += ["-map", "[m]"]
         cmd += ["-filter_complex", ";".join(fc)] + maps
-        cmd += video_args(self.codec, mbps, fps)
+        cmd += video_args(self.codec, mbps, fps, s.get("rec_preset", "Balanced"), s.get("rec_rc", "CBR"))
         if g_in is not None or m_in is not None:
-            cmd += ["-c:a", "aac", "-b:a", "160k"]
-        cmd += ["-f", "segment", "-segment_time", str(SEG), "-segment_format", "mpegts", seg_path(0).replace("0000000", "%07d")]
+            cmd += ["-c:a", "aac", "-b:a", f"{int(s.get('rec_audio_kbps', 160) or 160)}k"]
+        cmd += ["-f", "segment", "-segment_time", str(SEG), "-segment_format", "mpegts",
+                seg_path(0).replace("0000000", "%07d")]
+        if self.detect:
+            cmd += ["-map", "[d]", "-f", "rawvideo", "pipe:1"]
         return cmd
 
     # ---------------------------------------------------------------- start / stop
@@ -324,11 +390,18 @@ class Recorder:
                     loop = None
                     self.on_event("info", "Couldn't capture game sound, recording video without it.")
             mic = mic_name(self.s.get("mic_device")) if self.s.get("rec_mic") else None
+            if self.s.get("kill_detect", True) and killfeed.np is None:
+                self.on_event("info", "Setting up kill detection (one time)…")
+                if not killfeed.ensure_numpy():
+                    self.on_event("info", "Couldn't set up kill detection. Clips still save with your hotkey.")
+            self.s["_no_detect"] = killfeed.np is None
             cmd = self.build(ff, loop.rate if loop else None, loop.ch if loop else None, mic)
+            self.kills, self.auto_done_until, self.kf = [], -1.0, None
             try:
                 self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE if loop else subprocess.DEVNULL,
-                                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                                             creationflags=core.NO_WINDOW)
+                                             stdout=subprocess.PIPE if self.detect else subprocess.DEVNULL,
+                                             stderr=subprocess.PIPE, creationflags=core.NO_WINDOW,
+                                             bufsize=killfeed.FRAME_BYTES * 4 if self.detect else -1)
             except OSError as e:
                 if loop:
                     loop.close()
@@ -340,6 +413,8 @@ class Recorder:
                 threading.Thread(target=loop.pump, args=(self.proc.stdin,), daemon=True).start()
             threading.Thread(target=self._watch, args=(self.proc,), daemon=True).start()
             threading.Thread(target=self._prune, args=(self.proc,), daemon=True).start()
+            if self.detect:
+                threading.Thread(target=self._detect, args=(self.proc,), daemon=True).start()
         self.on_event("state", None)
         return True
 
@@ -397,6 +472,8 @@ class Recorder:
     def _prune(self, proc):
         while proc is self.proc and self.running:
             time.sleep(SEG)
+            if self.saving:                     # never delete pieces while a clip is being put together
+                continue
             idx = seg_indices()
             if not idx:
                 continue
@@ -404,12 +481,112 @@ class Recorder:
             keep = cur - int(self.s.get("replay_seconds", 30)) // SEG - 3
             if self.recording and self.rec_start is not None:
                 keep = min(keep, self.rec_start)
+            pend = self.pending_start()
+            if pend is not None:
+                keep = min(keep, int(pend // SEG) - 1)
             for i in idx:
                 if i < keep:
                     try:
                         os.remove(seg_path(i))
                     except OSError:
                         pass
+
+    # ---------------------------------------------------------------- kill detection + auto-clip
+    def _detect(self, proc):
+        kf = killfeed.KillFeed(sens=self.s.get("kill_sensitivity", "Normal"))
+        self.kf = kf
+        out = proc.stdout
+        while proc is self.proc and self.running:
+            try:
+                raw = out.read(killfeed.FRAME_BYTES)
+            except (OSError, ValueError):
+                break
+            if not raw or len(raw) < killfeed.FRAME_BYTES:
+                break
+            if not self.s.get("kill_detect", True):
+                kf.frame += 1
+                continue
+            for t in kf.push(raw):
+                self.kills.append(t)
+                self.on_event("kill", len(self.current_streak(kf.now)))
+            try:
+                self._auto_check(kf.now)
+            except Exception as e:
+                self.on_event("error", f"Auto-clip hiccup: {e}")
+
+    def stream_now(self):
+        if self.kf:
+            return self.kf.now
+        idx = seg_indices()
+        return (idx[-1] + 1) * SEG if idx else 0
+
+    def _groups(self):
+        gap = float(self.s.get("streak_gap", 25) or 25)
+        return killfeed.streaks([k for k in self.kills if k > self.auto_done_until], gap)
+
+    def current_streak(self, now=None):
+        now = self.stream_now() if now is None else now
+        g = self._groups()
+        if g and now - g[-1][-1] <= float(self.s.get("streak_gap", 25) or 25):
+            return g[-1]
+        return []
+
+    def pending_start(self):
+        """Earliest moment auto-clip may still need (so the buffer keeps it)."""
+        if not self.s.get("auto_clip", True):
+            return None
+        g = self._groups()
+        if not g:
+            return None
+        return g[0][0] - float(self.s.get("auto_pre", 8) or 8)
+
+    def _auto_check(self, now):
+        if not self.s.get("auto_clip", True) or self.saving:
+            return
+        gap = float(self.s.get("streak_gap", 25) or 25)
+        for grp in self._groups():
+            if now - grp[-1] <= gap:
+                break                                   # still going: wait for the play to finish
+            self.auto_done_until = grp[-1]
+            if len(grp) >= int(self.s.get("auto_clip_min", 2) or 2):
+                pre = float(self.s.get("auto_pre", 8) or 8)
+                post = float(self.s.get("auto_post", 3) or 3)
+                first = max(0, int((grp[0] - pre) // SEG))
+                last = int((grp[-1] + post) // SEG)
+                self._save_segments(first, last, "Clip", auto=len(grp))
+                break
+
+    def kills_between(self, first, last):
+        a, b = first * SEG, (last + 1) * SEG
+        return [round(k - a, 2) for k in self.kills if a <= k < b]
+
+    def _save_segments(self, first, last, kind, auto=0, wait=True):
+        """Join pieces first..last into a video and remember the kills in it."""
+        self.saving = True
+
+        def work():
+            try:
+                idx = seg_indices()
+                if not idx:
+                    raise RuntimeError("Nothing has been recorded yet.")
+                lo = max(first, idx[0])
+                hi = min(last, idx[-1])
+                if wait:
+                    self._wait_closed(hi)
+                out = self._join(lo, hi, self.out_path(kind))
+                kills = self.kills_between(lo, hi)
+                core.write_meta(out, {"kind": "auto" if auto else kind.lower(), "kills": kills,
+                                      "dur": (hi - lo + 1) * SEG, "source": "breachcut",
+                                      "made": datetime.now().isoformat(timespec="seconds")})
+                self.on_event("saved_auto" if auto else "saved", out)
+            except Exception as e:
+                self.on_event("error", f"Couldn't save the {kind.lower()}: {e}")
+            finally:
+                self.saving = False
+        if wait:
+            threading.Thread(target=work, daemon=True).start()
+        else:
+            work()
 
     # ---------------------------------------------------------------- saving
     def _wait_closed(self, i, timeout=SEG * 3):
@@ -443,8 +620,17 @@ class Recorder:
         return out
 
     def out_path(self, kind):
-        folder = self.s.get("recordings_dir") or os.path.join(core.default_library(), "Recordings")
-        return os.path.join(folder, f"Breachcut {kind} {datetime.now():%Y-%m-%d %H-%M-%S}.mp4")
+        if kind == "Recording":
+            folder = self.s.get("recordings_dir") or os.path.join(core.default_library(), "Recordings")
+        else:
+            folder = self.s.get("clips_dir") or os.path.join(core.default_library(), "Clips")
+        name = core.clip_filename(self.s, kind)
+        p = os.path.join(folder, name + ".mp4")
+        i = 2
+        while os.path.exists(p):
+            p = os.path.join(folder, f"{name} ({i}).mp4")
+            i += 1
+        return p
 
     def save_replay(self, seconds=None):
         if not self.running:
@@ -452,24 +638,14 @@ class Recorder:
             return
         if self.saving:
             return
-        self.saving = True
         seconds = int(seconds or self.s.get("replay_seconds", 30))
-
-        def work():
-            try:
-                idx = seg_indices()
-                if not idx:
-                    raise RuntimeError("Nothing has been recorded yet.")
-                cur = idx[-1]
-                self._wait_closed(cur)
-                n = max(1, -(-seconds // SEG))
-                out = self._join(max(idx[0], cur - n + 1), cur, self.out_path("Clip"))
-                self.on_event("saved", out)
-            except Exception as e:
-                self.on_event("error", f"Couldn't save the clip: {e}")
-            finally:
-                self.saving = False
-        threading.Thread(target=work, daemon=True).start()
+        idx = seg_indices()
+        if not idx:
+            self.on_event("error", "Nothing has been recorded yet.")
+            return
+        cur = idx[-1]
+        n = max(1, -(-seconds // SEG))
+        self._save_segments(max(idx[0], cur - n + 1), cur, "Clip")
 
     def start_recording(self):
         if not self.running and not self.start():
@@ -485,26 +661,13 @@ class Recorder:
             return
         self.recording = False
         first = self.rec_start or 0
+        self.rec_start = None
         self.on_event("state", None)
-
-        def work():
-            try:
-                idx = seg_indices()
-                if not idx:
-                    raise RuntimeError("Nothing was recorded.")
-                cur = idx[-1]
-                if wait:
-                    self._wait_closed(cur)
-                out = self._join(first, cur, self.out_path("Recording"))
-                self.on_event("saved", out)
-            except Exception as e:
-                self.on_event("error", f"Couldn't save the recording: {e}")
-            finally:
-                self.rec_start = None
-        if wait:
-            threading.Thread(target=work, daemon=True).start()
-        else:
-            work()
+        idx = seg_indices()
+        if not idx:
+            self.on_event("error", "Nothing was recorded.")
+            return
+        self._save_segments(first, idx[-1], "Recording", wait=wait)
 
     def toggle_recording(self):
         if self.recording:
@@ -605,12 +768,12 @@ class Hotkeys:
         self.thread = self.tid = None
 
 
-def recording_clip(path):
-    """Make a recording look like a Medal clip so the editor can open it."""
-    stamp = re.search(r"(\d{4})-(\d{2})-(\d{2}) (\d{2})-(\d{2})-(\d{2})", os.path.basename(path))
-    sid = "".join(stamp.groups()) if stamp else datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y%m%d%H%M%S")
-    return {"id": f"rec{sid}", "path": path, "dur": core.probe_duration(path), "kills": [], "top": 0,
-            "mode": "Recording", "title": "", "created": None}
+def recording_clip(path, s=None):
+    """A saved recording / clip as a clip entry the editor can open (with any kills Breachcut found)."""
+    c = core.clip_from_file(path, s, "recording")
+    if c and not c.get("dur"):
+        c["dur"] = core.probe_duration(path)
+    return c
 
 
 def list_recordings(s):
