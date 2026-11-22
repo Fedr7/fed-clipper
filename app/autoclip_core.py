@@ -1,6 +1,7 @@
 """
 Breachcut - core (no UI).
-Finds R6 multi-kills in Medal's clip database and renders them as TikTok/Shorts (vertical 1080x1920)
+Keeps Breachcut's own clip library (clips the built-in recorder saved, with the kills it spotted) and renders them as
+TikTok/Shorts (vertical 1080x1920)
 or YouTube widescreen (1920x1080) edits: haze grade, sharpened, glowing name intro, flash cuts.
 """
 import hashlib
@@ -45,8 +46,8 @@ def default_library():
     return os.path.join(default_desktop(), APP_NAME)
 
 DEFAULTS = {
-    "medal_dir": r"C:\Medal",
     "library_dir": default_library(),
+    "clips_dir": os.path.join(default_library(), "Clips"),
     "output_dir": os.path.join(default_library(), "TikTok"),
     "youtube_dir": os.path.join(default_library(), "YouTube"),
     "recordings_dir": os.path.join(default_library(), "Recordings"),
@@ -55,10 +56,22 @@ DEFAULTS = {
     "intro_image": "",            # custom intro PNG (optional)
     "voice_file": "",             # custom intro voice (optional)
     "onboarded": False,
-    "min_kills": 3,               # 3 = 3Ks, 4Ks and Aces
-    "modes": ["Ranked", "Unranked", "QuickMatch", "Quick Match", "Standard"],
+    "min_kills": 3,               # auto-make videos for 3Ks, 4Ks and Aces
     "only_new_after": None,       # ISO date; clips older than this are ignored (set on first run)
-    "watch_minutes": 5,
+    "auto_make": True,            # turn big plays into TikTok / YouTube videos by itself
+    # kill detection + auto-clip (Breachcut watches the score feed on screen)
+    "kill_detect": True,
+    "kill_sensitivity": "Normal", # Low / Normal / High
+    "auto_clip": True,            # save a clip by itself after a multi-kill
+    "auto_clip_min": 2,           # kills in one play before a clip is saved
+    "streak_gap": 25,             # kills this close together count as one play
+    "auto_pre": 8,                # seconds saved before the first kill
+    "auto_post": 3,               # seconds saved after the last kill
+    "kill_sound": False,          # little tick when a kill is detected
+    "scan_old": True,             # look for kills in recordings that don't have them yet
+    "clip_name": "Breachcut {kind} {date} {time}",
+    "show_hotkey_clips": True,
+    "keep_auto_days": 0,          # 0 = keep forever
     # general
     "launch_on_startup": False,
     "start_minimized": False,
@@ -78,6 +91,13 @@ DEFAULTS = {
     "rec_fps": 60,
     "rec_bitrate": 20,            # Mbps
     "rec_encoder": "Auto",
+    "rec_codec": "H.264",         # H.264 / HEVC
+    "rec_preset": "Balanced",     # Performance / Balanced / Quality
+    "rec_rc": "CBR",              # CBR / VBR
+    "rec_capture": "Auto",        # Auto (Desktop Duplication) / Compatibility (GDI)
+    "rec_monitor": 0,
+    "rec_cursor": False,
+    "rec_audio_kbps": 160,
     # audio
     "rec_game_audio": True,
     "rec_game_vol": 100,
@@ -85,15 +105,25 @@ DEFAULTS = {
     "mic_device": "Default",
     "mic_vol": 100,
     "separate_tracks": True,
+    "mic_noise": False,           # noise suppression
+    "mic_gate": False,            # noise gate (cuts background hum between words)
+    "mic_mono": True,
     # hotkeys
-    "hk_clip": "F10",             # F8 is Medal's clip key, so ours avoids it
+    "hk_clip": "F10",
     "hk_record": "Shift+F10",
+    "hk_clip_short": "None",      # save the last 15 seconds
+    "hk_clip_long": "None",       # save the last 2 minutes
+    "hk_buffer": "None",          # turn the replay buffer on / off
+    "hk_autoclip": "None",        # turn auto-clip on / off
+    "hotkey_sound": True,
     # storage
     "storage_limit_gb": 50,
     "auto_delete_days": 0,        # 0 = never
     "delete_when_full": True,
     # notifications
     "notify_made": True,
+    "notify_clip": True,          # tell me when a clip is saved
+    "notify_kill": False,         # tell me on every detected kill
     "notify_sound": True,
     "notify_update": True,
 }
@@ -140,15 +170,6 @@ def migrate_settings(s, existed):
         s["onboarded"] = True
         save_settings(s)
     return s
-
-
-def find_medal_dir():
-    home = os.path.expanduser("~")
-    for d in (r"C:\Medal", r"D:\Medal", os.path.join(home, "Medal"), os.path.join(home, "Videos", "Medal"),
-              os.path.join(os.environ.get("APPDATA", ""), "Medal")):
-        if os.path.isdir(os.path.join(d, "Databases")):
-            return d
-    return r"C:\Medal"
 
 
 def save_settings(s):
@@ -262,64 +283,120 @@ class Encoder:
         self._run([self.ff, "-nostdin", "-v", "error", "-y"] + args)
 
 
-# ------------------------------------------------------------------ Medal database
-def read_clips(medal_dir):
-    """Return R6 clips with kill events, newest first. Copies the DB so Medal can keep using it."""
-    dbs = sorted(glob.glob(os.path.join(medal_dir, "Databases", "medal-*.db")), key=os.path.getmtime, reverse=True)
-    if not dbs:
-        raise RuntimeError(f"No Medal database found in {os.path.join(medal_dir, 'Databases')}")
-    tmp = os.path.join(tempfile.gettempdir(), "fed_autoclip_medal.db")
-    shutil.copy2(dbs[0], tmp)
-    con = sqlite3.connect(tmp)
-    rows = con.execute("select video_path, metadata, created_at from contents "
-                       "where video_path like '%RainbowSix%'").fetchall()
-    con.close()
-    clips = []
-    for path, meta, created in rows:
-        if not isinstance(meta, (bytes, bytearray)):
-            meta = (meta or "").encode("utf-8", "ignore")
-        ev = sorted(set((float(t), n.decode("utf-8", "ignore")) for t, n in
-                        re.findall(rb"time.([0-9]+(?:\.[0-9]+)?)Gname.(.{1,40}?)Gdata", meta, re.S)))
-        m = re.search(rb"Mode.([A-Za-z ]{3,20}?)G", meta)
-        mode = m.group(1).decode() if m else "?"
-        title = re.findall(rb"((?:Ace|\dK|Kill)[^\x00-\x1f]{0,40}?- [A-Z][a-z]+(?: - [A-Z][a-z]+)?)", meta)
-        kills = []
-        for t, n in ev:
-            if n in KILL_EVENTS and (not kills or t - kills[-1] > 0.15):
-                kills.append(t)
-        top = max([RANK[n] for t, n in ev if n in RANK] or [0])
-        d = re.search(rb"clipDuration.([0-9]+(?:\.[0-9]+)?)", meta)
-        dur = float(d.group(1)) if d else None
-        maps = re.findall(rb"- ([A-Z][A-Za-z ]{2,20})(?:\x97|$)", meta)
-        clips.append({"dur": dur, "path": path, "id": os.path.splitext(re.split(r"[\\/]", path)[-1])[0], "created": created,
-                      "mode": mode, "kills": kills, "top": top,
-                      "title": title[0].decode("utf-8", "ignore") if title else ""})
-    clips.sort(key=lambda c: c["id"], reverse=True)
-    return clips
+# ------------------------------------------------------------------ Breachcut's own clip library
+META_DIR = os.path.join(APP_DIR, "clipmeta")
+STAMP = re.compile(r"(\d{4})-(\d{2})-(\d{2})[ _](\d{2})[-.](\d{2})[-.](\d{2})")
+
+
+def _meta_file(path):
+    return os.path.join(META_DIR, re.sub(r"[^\w.() -]", "_", os.path.basename(path)) + ".json")
+
+
+def read_meta(path):
+    try:
+        return json.load(open(_meta_file(path), encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def write_meta(path, meta):
+    os.makedirs(META_DIR, exist_ok=True)
+    old = read_meta(path) or {}
+    old.update(meta)
+    tmp = _meta_file(path) + ".tmp"
+    json.dump(old, open(tmp, "w", encoding="utf-8"), indent=1)
+    os.replace(tmp, _meta_file(path))
+
+
+def clip_filename(s, kind):
+    now = datetime.now()
+    tpl = s.get("clip_name") or DEFAULTS["clip_name"]
+    try:
+        name = tpl.format(kind=kind, date=now.strftime("%Y-%m-%d"), time=now.strftime("%H-%M-%S"), game="Siege")
+    except (KeyError, IndexError, ValueError):
+        name = f"Breachcut {kind} {now:%Y-%m-%d %H-%M-%S}"
+    if not STAMP.search(name):
+        name += f" {now:%Y-%m-%d %H-%M-%S}"
+    return NAME_BAD.sub("", name).strip() or f"Breachcut {kind} {now:%Y-%m-%d %H-%M-%S}"
+
+
+def best_run(kills, gap=25.0):
+    """Most kills in one play (kills no more than `gap` seconds apart)."""
+    best = run = 0
+    last = None
+    for k in sorted(kills):
+        run = run + 1 if last is not None and k - last <= gap else 1
+        best = max(best, run)
+        last = k
+    return best
+
+
+def clip_from_file(path, s=None, kind=None):
+    """Turn a saved video into a clip entry the app understands."""
+    s = s or {}
+    meta = read_meta(path) or {}
+    kills = [float(k) for k in meta.get("kills") or []]
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    kind = meta.get("kind") or kind or "clip"
+    m = STAMP.search(os.path.basename(path))
+    when = datetime(*map(int, m.groups())) if m else datetime.fromtimestamp(st.st_mtime)
+    top = min(5, best_run(kills, float(s.get("streak_gap", 25) or 25)))
+    dur = meta.get("dur") or None
+    return {"dur": dur, "path": path, "id": os.path.splitext(os.path.basename(path))[0], "created": when.isoformat(),
+            "when": when, "mode": "Recording" if kind == "recording" else "Siege", "kind": kind, "kills": kills,
+            "top": top if top >= 3 else (1 if kills else 0), "nkills": len(kills), "scanned": "kills" in meta,
+            "size": st.st_size, "title": ""}
+
+
+def read_clips(s):
+    """Every clip and recording in Breachcut's library, newest first."""
+    out, seen = [], set()
+    for key, kind in (("clips_dir", "clip"), ("recordings_dir", "recording")):
+        folder = s.get(key) or ""
+        if not os.path.isdir(folder):
+            continue
+        for n in os.listdir(folder):
+            p = os.path.join(folder, n)
+            if not n.lower().endswith(VIDEO_EXT) or n.endswith(".part.mp4") or not os.path.isfile(p):
+                continue
+            k = os.path.normcase(os.path.abspath(p))
+            if k in seen:
+                continue
+            seen.add(k)
+            c = clip_from_file(p, s, kind)
+            if c:
+                out.append(c)
+    out.sort(key=lambda c: c["when"], reverse=True)
+    return out
 
 
 def clip_time(c):
+    if c.get("when"):
+        return c["when"]
+    m = STAMP.search(c["id"])
+    if m:
+        return datetime(*map(int, m.groups()))
     s = re.search(r"(\d{14})", c["id"])
     return datetime.strptime(s.group(1), "%Y%m%d%H%M%S") if s else datetime.min
 
 
-def pick_new_highlights(clips, settings, state):
-    """Clips worth a solo video: enough kills, allowed mode, not done, not a duplicate save of the same play."""
+def pick_new_highlights(clips, settings, state, kinds=("auto",)):
+    """Clips worth a video of their own: enough kills in one play, not made yet. By default only auto-clips
+    (the hotkey clip and the auto-clip of the same play would otherwise both get made)."""
     after = settings.get("only_new_after")
     after_dt = datetime.fromisoformat(after) if after else None
     chosen = []
     for c in sorted(clips, key=clip_time):
-        if c["mode"] not in settings["modes"] or c["top"] < settings["min_kills"] or len(c["kills"]) < 2:
+        if kinds and c.get("kind") not in kinds:
+            continue
+        if c["top"] < settings["min_kills"] or len(c["kills"]) < 2:
             continue
         if after_dt and clip_time(c) < after_dt:
             continue
         if c["id"] in state["done"]:
-            continue
-        # Medal often saves the same play twice a few seconds apart: keep only the first
-        if any(abs((clip_time(c) - clip_time(o)).total_seconds()) < 150 and o["top"] == c["top"]
-               for o in chosen) or any(abs((clip_time(c) - datetime.fromisoformat(v["clip_time"])).total_seconds()) < 150
-                                       and v.get("top") == c["top"] for v in state["done"].values() if v.get("clip_time")):
-            state["done"][c["id"]] = {"skipped": "duplicate", "clip_time": clip_time(c).isoformat(), "top": c["top"]}
             continue
         chosen.append(c)
     return chosen
@@ -329,8 +406,6 @@ def fastest_bursts(clips, settings, max_gap=3.0):
     """Every multi-kill burst (kills <= max_gap apart), fastest first, duplicates removed."""
     out = []
     for c in clips:
-        if c["mode"] not in settings["modes"]:
-            continue
         k = c["kills"]
         i = 0
         while i < len(k):
@@ -738,8 +813,11 @@ def video_thumb(enc, v):
 
 def parts(c):
     """('ACE', 'Ash', 'Oregon') style info for the gallery card."""
-    kind = {5: "ACE", 4: "4K", 3: "3K"}.get(c["top"]) or (f"{len(c['kills'])}K" if len(c["kills"]) > 1
-                                                          else ("1 KILL" if c["kills"] else ""))
+    n = len(c["kills"])
+    if c.get("kind") == "recording" or n > 5:
+        kind = f"{n} KILLS" if n > 1 else ("1 KILL" if n else "")
+    else:
+        kind = {5: "ACE", 4: "4K", 3: "3K"}.get(c["top"]) or (f"{n}K" if n > 1 else ("1 KILL" if n else ""))
     bits = [p.strip() for p in c["title"].split("-")[1:]] if c["title"] else []
     mp = next((b for b in bits if b.lower() in MAPS), "")
     op = next((b for b in bits if b != mp), "")
@@ -758,8 +836,8 @@ VIDEO_EXT = (".mp4", ".mov", ".mkv")
 
 def library_folders(s):
     """(label, path) for every folder Breachcut stores videos in."""
-    return [("TikTok / Shorts", s.get("output_dir") or ""), ("YouTube", s.get("youtube_dir") or ""),
-            ("Recordings", s.get("recordings_dir") or "")]
+    return [("Clips", s.get("clips_dir") or ""), ("Recordings", s.get("recordings_dir") or ""),
+            ("TikTok / Shorts", s.get("output_dir") or ""), ("YouTube", s.get("youtube_dir") or "")]
 
 
 def _videos_in(folder):
@@ -858,8 +936,8 @@ def clear_thumbs():
 
 
 def move_library(s, new_root, state=None, log=print):
-    """Move every Breachcut video into new_root\\TikTok, \\YouTube, \\Recordings and point the settings there."""
-    targets = {"output_dir": "TikTok", "youtube_dir": "YouTube", "recordings_dir": "Recordings"}
+    """Move every Breachcut video into new_root\\Clips, \\TikTok, \\YouTube, \\Recordings and point settings there."""
+    targets = {"output_dir": "TikTok", "youtube_dir": "YouTube", "recordings_dir": "Recordings", "clips_dir": "Clips"}
     moved = 0
     remap = {}
     for key, sub in targets.items():
