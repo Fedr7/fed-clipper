@@ -1,6 +1,6 @@
 {
-  "version": "1.7.2",
-  "notes": "Breachcut's own clip sounds and a small in-game pop-up that never tabs you out.",
+  "version": "1.7.3",
+  "notes": "New: Join the Discord from the account menu (help & bug reports).",
   "files": [
     "sounds.py",
     "killfeed.py",
