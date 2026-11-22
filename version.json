@@ -1,6 +1,6 @@
 {
-  "version": "1.7.3",
-  "notes": "New: Join the Discord from the account menu (help & bug reports).",
+  "version": "1.7.4",
+  "notes": "New: Report a bug right from the app (click your profile picture).",
   "files": [
     "sounds.py",
     "killfeed.py",
