@@ -5,6 +5,7 @@ Pages:  Home · Clips (everything Medal saved) · TikTok · YouTube (Shorts + Wi
 """
 import os
 import queue
+import sys
 import subprocess
 import threading
 import time
@@ -17,6 +18,7 @@ from PIL import Image, ImageDraw, ImageTk
 import auth
 import autoclip_core as core
 import login
+import settings_page
 import updater
 import ui_kit as ui
 from ui_kit import (ACCENT, ACCENT_HI, BADGE, BG, CARD, CARD_HI, DIM, FONT, FONT_BOLD, FONT_SEMI, GOOD, LINE,
@@ -708,13 +710,16 @@ class AutoPage(Page):
         tk.Label(opts, text="Make these automatically", fg=TEXT, bg=BG, font=(FONT, 12, "bold")).grid(
             row=0, column=0, sticky="w", columnspan=3)
         self.fv = {}
+        self.toggles = []
         for i, (key, text) in enumerate((("vertical", "TikTok / Shorts  (vertical)"),
                                          ("wide", "YouTube widescreen  (16:9)"))):
             v = tk.BooleanVar(value=key in app.s.get("auto_formats", []))
             self.fv[key] = v
             cell = tk.Frame(opts, bg=BG)
             cell.grid(row=1, column=i, sticky="w", padx=(0, 28), pady=8)
-            Toggle(cell, v, command=self.save_formats, bg=BG).pack(side="left")
+            tg = Toggle(cell, v, command=self.save_formats, bg=BG)
+            tg.pack(side="left")
+            self.toggles.append(tg)
             tk.Label(cell, text="  " + text, fg=TEXT, bg=BG, font=(FONT, 10)).pack(side="left")
         tk.Label(opts, text="When I get", fg=MUTED, bg=BG, font=(FONT, 10)).grid(row=2, column=0, sticky="w", pady=6)
         self.mk = tk.StringVar(value={3: "3K or better", 4: "4K or better", 5: "Aces only"}.get(app.s["min_kills"], "3K or better"))
@@ -763,124 +768,17 @@ class AutoPage(Page):
         self.log.config(text="\n".join(self.app.activity[-14:]) or "Nothing yet.")
 
     def on_show(self):
+        s = self.app.s
+        for k, v in self.fv.items():
+            v.set(k in (s.get("auto_formats") or []))
+        self.mk.set({3: "3K or better", 4: "4K or better", 5: "Aces only"}.get(s["min_kills"], "3K or better"))
+        self.ev.set(str(s["watch_minutes"]))
+        for tg in self.toggles:
+            tg._draw()
         self.refresh()
 
 
-class SettingsPage(Page):
-    title = "Settings"
-    subtitle = "Your intro, folders and app info."
-
-    def __init__(self, app):
-        super().__init__(app)
-        body = ScrollGrid(self)
-        body.pack(fill="both", expand=True, padx=(28, 6), pady=8)
-        b = body.inner
-        self.vals = {}
-
-        def section(text):
-            tk.Label(b, text=text, fg=ACCENT, bg=BG, font=(FONT, 12, "bold")).pack(anchor="w", pady=(16, 6))
-
-        section("Your intro")
-        r = tk.Frame(b, bg=BG)
-        r.pack(fill="x")
-        tk.Label(r, text="Name / gamertag", fg=TEXT, bg=BG, font=(FONT, 10), width=18, anchor="w").pack(side="left")
-        self.vals["creator"] = tk.StringVar(value=app.s.get("creator", ""))
-        tk.Entry(r, textvariable=self.vals["creator"], width=24, bg=CARD, fg=TEXT, insertbackground=TEXT,
-                 relief="flat", font=(FONT, 11)).pack(side="left", ipady=5)
-        button(r, "Update preview", self.preview_intro, small=True).pack(side="left", padx=8)
-        self.intro_img = tk.Label(b, bg="#000000", width=432, height=280)
-        self.intro_img.pack(anchor="w", pady=8)
-        r2 = tk.Frame(b, bg=BG)
-        r2.pack(fill="x")
-        button(r2, "Use my own logo image…", self.pick_intro, small=True).pack(side="left")
-        button(r2, "Use my name instead", self.clear_intro, "ghost", small=True).pack(side="left", padx=6)
-        r3 = tk.Frame(b, bg=BG)
-        r3.pack(fill="x", pady=(10, 0))
-        tk.Label(r3, text="Intro voice", fg=TEXT, bg=BG, font=(FONT, 10), width=18, anchor="w").pack(side="left")
-        self.voice_l = tk.Label(r3, text="", fg=MUTED, bg=BG, font=(FONT, 10))
-        self.voice_l.pack(side="left")
-        button(r3, "Pick audio…", self.pick_voice, small=True).pack(side="left", padx=8)
-        button(r3, "None", self.clear_voice, "ghost", small=True).pack(side="left")
-
-        section("Folders")
-        for key, text in (("medal_dir", "Medal folder"), ("output_dir", "TikTok / Shorts videos"),
-                          ("youtube_dir", "YouTube widescreen videos")):
-            rr = tk.Frame(b, bg=BG)
-            rr.pack(fill="x", pady=3)
-            tk.Label(rr, text=text, fg=TEXT, bg=BG, font=(FONT, 10), width=24, anchor="w").pack(side="left")
-            v = tk.StringVar(value=app.s.get(key, ""))
-            self.vals[key] = v
-            tk.Entry(rr, textvariable=v, width=52, bg=CARD, fg=TEXT, insertbackground=TEXT, relief="flat",
-                     font=(FONT, 10)).pack(side="left", ipady=4)
-            button(rr, "…", lambda v=v: v.set(filedialog.askdirectory() or v.get()), small=True).pack(side="left", padx=6)
-        button(b, "Save", self.save, "accent").pack(anchor="w", pady=14)
-        self.saved = tk.Label(b, text="", fg=GOOD, bg=BG, font=(FONT, 10))
-        self.saved.pack(anchor="w")
-
-        section("About")
-        tk.Label(b, text=f"{core.APP_NAME}  v{updater.local_version()}", fg=TEXT, bg=BG, font=(FONT, 10, "bold")).pack(anchor="w")
-        tk.Label(b, text="Works with Medal clips from Rainbow Six Siege. Reads clips only — never touches the game,\n"
-                         "so it's safe with BattlEye. Not affiliated with Ubisoft or Medal.",
-                 fg=MUTED, bg=BG, font=(FONT, 9), justify="left").pack(anchor="w", pady=(2, 8))
-        button(b, "Check for updates", app.manual_update_check, small=True).pack(anchor="w", pady=(0, 30))
-        self.refresh_labels()
-
-    def refresh_labels(self):
-        vf = self.app.s.get("voice_file") or ""
-        self.voice_l.config(text=os.path.basename(vf) if vf and os.path.exists(vf) else "none")
-        self.preview_intro()
-
-    def preview_intro(self):
-        s = dict(self.app.s)
-        s["creator"] = self.vals["creator"].get()
-        img, _ = core.brand_assets(s)
-        if img and os.path.exists(img):
-            im = Image.open(img).convert("RGBA")
-            base = Image.new("RGBA", im.size, (18, 12, 24, 255))
-            base.alpha_composite(im)
-            base = base.resize((432, 280), Image.LANCZOS)
-            self._intro_ph = ImageTk.PhotoImage(base)
-            self.intro_img.config(image=self._intro_ph, width=432, height=280)
-        else:
-            self._intro_ph = None
-            self.intro_img.config(image="", text="Type your name to make an intro", fg=MUTED)
-
-    def pick_intro(self):
-        f = filedialog.askopenfilename(title="Pick a logo (PNG with transparent background works best)",
-                                       filetypes=[("Images", "*.png *.jpg *.jpeg")])
-        if f:
-            self.app.s["intro_image"] = f
-            core.save_settings(self.app.s)
-            self.refresh_labels()
-
-    def clear_intro(self):
-        self.app.s["intro_image"] = ""
-        core.save_settings(self.app.s)
-        self.refresh_labels()
-
-    def pick_voice(self):
-        f = filedialog.askopenfilename(title="Pick a short voice clip for your intro",
-                                       filetypes=[("Audio", "*.mp3 *.wav *.m4a *.ogg"), ("All", "*.*")])
-        if f:
-            self.app.s["voice_file"] = f
-            core.save_settings(self.app.s)
-            self.refresh_labels()
-
-    def clear_voice(self):
-        self.app.s["voice_file"] = ""
-        core.save_settings(self.app.s)
-        self.refresh_labels()
-
-    def save(self):
-        changed_medal = self.vals["medal_dir"].get().strip() != self.app.s.get("medal_dir")
-        for k, v in self.vals.items():
-            self.app.s[k] = v.get().strip()
-        core.save_settings(self.app.s)
-        self.saved.config(text="✓ Saved")
-        self.after(2500, lambda: self.saved.config(text=""))
-        self.refresh_labels()
-        if changed_medal:
-            self.app.reload()
+SettingsPage = settings_page.make_settings_page(Page, ScrollGrid)
 
 
 # ---------------------------------------------------------------- sidebar widgets
@@ -980,6 +878,7 @@ class App:
             self.s["only_new_after"] = datetime.now().isoformat(timespec="seconds")
             core.save_settings(self.s)
         self.state = core.load_state()
+        core.apply_settings(self.s)
         self.q = queue.Queue()
         self.jobs = queue.Queue()
         self.thumbs = queue.LifoQueue()
@@ -1006,6 +905,7 @@ class App:
         self.show("home")
         self.reload()
         threading.Thread(target=self._check_update, daemon=True).start()
+        threading.Thread(target=self._storage_check, daemon=True).start()
         if self.session:
             threading.Thread(target=self._sync_profile, daemon=True).start()
         if not self.s.get("onboarded"):
@@ -1417,7 +1317,7 @@ class App:
                 self.q.put(("status", "Couldn't reach the update server — try again later."))
                 return
         if m:
-            self.q.put(("patch", m))
+            self.q.put(("autoupdate" if self.s.get("auto_update", True) and not manual else "patch", m))
         elif manual:
             self.q.put(("status", f"You're on the latest version (v{updater.local_version()})."))
 
@@ -1447,6 +1347,64 @@ class App:
                 self.q.put(("error", f"Update failed (nothing changed): {e}"))
         threading.Thread(target=work, daemon=True).start()
 
+    def _storage_check(self):
+        try:
+            n, _ = core.enforce_storage(self.s, self.state, log=lambda t: self.q.put(("log", t)))
+            if n:
+                self.q.put(("storage", n))
+        except Exception:
+            pass
+
+    def notify(self, title, body="", path=None):
+        """Small pop-up in the bottom-right corner of the screen (works while the app is minimized)."""
+        if self.s.get("notify_sound", True):
+            try:
+                import winsound
+                winsound.MessageBeep(winsound.MB_ICONASTERISK)
+            except Exception:
+                pass
+        old = getattr(self, "_toast", None)
+        if old is not None:
+            try:
+                old.destroy()
+            except tk.TclError:
+                pass
+        t = tk.Toplevel(self.root)
+        self._toast = t
+        t.overrideredirect(True)
+        t.configure(bg=ACCENT)
+        try:
+            t.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        w, h = 360, 86
+        sw, sh = t.winfo_screenwidth(), t.winfo_screenheight()
+        t.geometry(f"{w}x{h}+{sw - w - 24}+{sh - h - 64}")
+        f = tk.Frame(t, bg=PANEL)
+        f.pack(fill="both", expand=True, padx=(4, 1), pady=1)
+        mark = os.path.join(core.ASSETS, "breachcut_mark.png")
+        if os.path.exists(mark):
+            t._img = ImageTk.PhotoImage(Image.open(mark).convert("RGBA").resize((40, 40), Image.LANCZOS))
+            tk.Label(f, image=t._img, bg=PANEL).pack(side="left", padx=(14, 10))
+        txt = tk.Frame(f, bg=PANEL)
+        txt.pack(side="left", fill="both", expand=True, pady=14)
+        tk.Label(txt, text=title, fg=TEXT, bg=PANEL, font=(FONT_SEMI, 10), anchor="w").pack(fill="x")
+        tk.Label(txt, text=body[:60], fg=MUTED, bg=PANEL, font=(FONT, 9), anchor="w").pack(fill="x")
+        x = tk.Label(f, text="✕", fg=DIM, bg=PANEL, font=(FONT, 10), cursor="hand2")
+        x.pack(side="right", anchor="n", padx=10, pady=8)
+        x.bind("<Button-1>", lambda e: t.destroy())
+
+        def click(e):
+            t.destroy()
+            if path and os.path.exists(path):
+                show_in_folder(path)
+            else:
+                self.root.deiconify()
+                self.root.lift()
+        for wdg in (f, txt) + tuple(txt.winfo_children()):
+            wdg.bind("<Button-1>", click)
+        t.after(6000, lambda: t.winfo_exists() and t.destroy())
+
     # ---------------------------------------------------------------- workers
     def ensure_enc(self):
         if self.enc is None:
@@ -1454,6 +1412,7 @@ class App:
             if not ff:
                 raise RuntimeError("FFmpeg is missing — run the installer again.")
             self.enc = core.Encoder(ff)
+            core.apply_settings(self.s, self.enc)
         return self.enc
 
     def _job_worker(self):
@@ -1522,6 +1481,9 @@ class App:
                 elif kind == "made":
                     cid, out = val
                     self.status(f"✅ Saved {os.path.basename(out)}", log=True)
+                    if self.s.get("notify_made", True):
+                        self.notify("Your video is ready", os.path.basename(out), out)
+                    threading.Thread(target=self._storage_check, daemon=True).start()
                     if cid and self.sel_kind == "clip" and self.sel and self.sel["id"] == cid:
                         self.select_clip(self.sel)
                         self.v_status.config(text="✅ Done! Find it in the TikTok / YouTube tab.", fg=GOOD)
@@ -1541,6 +1503,18 @@ class App:
                         self.pages["home"].render()
                 elif kind == "patch":
                     self._show_patch(val)
+                    if self.s.get("notify_update", True):
+                        self.notify(f"Update {val['version']} is ready", val.get("notes") or "Click Update now to install.")
+                elif kind == "autoupdate":
+                    self.patch = val
+                    if self.jobs.empty():
+                        self.status(f"Installing update {val['version']}…")
+                        self._do_update()
+                    else:
+                        self._show_patch(val)
+                elif kind == "storage":
+                    if self.current in ("tiktok", "youtube"):
+                        self.pages[self.current].render()
                 elif kind == "patched":
                     messagebox.showinfo(core.APP_NAME, f"Updated to {self.patch['version']}! Restarting…")
                     updater.restart()
@@ -1561,7 +1535,10 @@ def main():
     root.configure(bg=BG)
 
     def ready(session, online):
-        App(root, session, online)
+        app = App(root, session, online)
+        if "--startup" in sys.argv and app.s.get("start_minimized"):
+            root.iconify()
+            return
         root.deiconify()
         try:
             root.lift()
