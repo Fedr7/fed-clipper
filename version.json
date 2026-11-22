@@ -1,13 +1,16 @@
 {
-  "version": "1.5.0",
-  "notes": "Super easy editor: drag to trim, split, one-click looks, Undo. Plus the new Settings and your own video library.",
+  "version": "1.6.0",
+  "notes": "Built-in recorder: press F10 to save the last clip, Shift+F10 to record. Game + mic audio, turns on by itself when Siege is open.",
   "files": [
-    "editor.py",
-    "settings_page.py",
-    "autoclip_core.py",
+    "recorder.py",
     "breachcut.py",
+    "autoclip_core.py",
+    "settings_page.py",
+    "editor.py",
     "ui_kit.py",
     "auth.py",
-    "login.py"
+    "login.py",
+    "make_assets.py",
+    "make_shortcut.ps1"
   ]
 }
