@@ -1,7 +1,7 @@
 """
-Breachcut - turn your Rainbow Six Siege Medal clips into TikToks, Shorts and YouTube edits.
+Breachcut - records Rainbow Six Siege, spots your kills by itself and turns them into TikToks, Shorts and YouTube edits.
 
-Pages:  Home · Clips (everything Medal saved) · TikTok · YouTube (Shorts + Widescreen) · Auto-clip · Settings
+Pages:  Home · Clips (everything Breachcut saved) · TikTok · YouTube (Shorts + Widescreen) · Auto-clip · Settings
 """
 import os
 import queue
@@ -18,6 +18,7 @@ from PIL import Image, ImageDraw, ImageTk
 import auth
 import autoclip_core as core
 import login
+import killfeed
 import recorder
 import settings_page
 import updater
@@ -71,7 +72,7 @@ def badge_image(text, color, h=20, font_px=11):
 
 
 def compose_thumb(path, size, badges_tl=(), badge_br=None, marks_bl=()):
-    """Thumbnail with Medal-style overlay badges."""
+    """Thumbnail with overlay badges."""
     w, h = size
     try:
         im = Image.open(path).convert("RGB")
@@ -285,7 +286,7 @@ class HomePage(tk.Frame):
         elif clips:
             sub = "You're all caught up. Go hit some heads."
         else:
-            sub = "Play some Siege with Medal running — your clips will show up here."
+            sub = "Open Siege and play — Breachcut saves your kills by itself and they show up here."
         hero.create_text(x, H // 2 + 30, text=sub, fill=MUTED, font=(FONT, 11), anchor="w")
         btn = RoundButton(hero, "⚡  Make them all" if ready else "🎬  Browse clips",
                           (lambda: app.make_all(ready)) if ready else (lambda: app.show("clips")),
@@ -421,12 +422,14 @@ def _hero_px(im, x, y):
 
 class ClipsPage(Page):
     title = "Clips"
-    subtitle = "Everything Medal saved from Siege. Click a clip to watch it or turn it into a TikTok / YouTube edit."
-    FILTERS = ("All", "Aces", "4K+", "3K+", "Multi-kills", "Edited")
+    subtitle = "Everything Breachcut saved from Siege. Click a clip to watch it or turn it into a TikTok / YouTube edit."
+    FILTERS = ("All", "Aces", "4K+", "3K+", "Multi-kills", "Auto-clips", "Recordings", "Edited")
 
     def __init__(self, app):
         super().__init__(app)
         button(self.head_right, "⟳  Refresh", app.reload, "normal", small=True).pack(side="right")
+        button(self.head_right, "📂  Open folder", lambda: app.open_dir(app.s.get("clips_dir") or ""),
+               small=True).pack(side="right", padx=6)
         bar = tk.Frame(self, bg=BG)
         bar.pack(fill="x", padx=28, pady=(2, 10))
         self.filter = "All"
@@ -436,7 +439,7 @@ class ClipsPage(Page):
             b.pack(side="left", padx=(0, 6))
             self.fbtn[f] = b
         self.search = tk.StringVar()
-        search_box(bar, self.search, "Search operator, map or day").pack(side="right")
+        search_box(bar, self.search, "Search by name or day").pack(side="right")
         self.search.trace_add("write", lambda *a: self.apply())
         self.count = tk.Label(bar, text="", fg=MUTED, bg=BG, font=(FONT, 9))
         self.count.pack(side="right", padx=12)
@@ -465,8 +468,11 @@ class ClipsPage(Page):
             if f == "3K+" and c["top"] < 3: continue
             if f == "Multi-kills" and len(c["kills"]) < 2: continue
             if f == "Edited" and not self.app.made_any(c): continue
+            if f == "Auto-clips" and c.get("kind") != "auto": continue
+            if f == "Recordings" and c.get("kind") != "recording": continue
             if q:
-                hay = " ".join(core.parts(c)[1:]) + " " + c["title"] + " " + core.clip_time(c).strftime("%b %d %A")
+                hay = " ".join(core.parts(c)[1:]) + " " + c["title"] + " " + c["id"] + " " + \
+                    core.clip_time(c).strftime("%b %d %A")
                 if q not in hay.lower(): continue
             out.append(c)
         self.shown, self.limit = out, PAGE
@@ -748,7 +754,9 @@ class RecorderPage(VideosPage):
         mode = {"siege": "Turns on by itself when Siege opens.", "always": "On whenever Breachcut is open.",
                 "off": "Only records when you press Record."}.get(self.app.s.get("rec_mode", "siege"), "")
         enc = f"  ·  Encoding on {recorder.encoder_name(r.codec)}" if r.codec else ""
-        self.hint_l.config(text=f"Save clip: {clip}   ·   Record: {rec}   ·   {mode}{enc}")
+        ac = (f"Auto-clip on · {len(r.kills)} kill{'s' if len(r.kills) != 1 else ''} spotted" if self.app.watching
+              and r.detect and r.running else ("Auto-clip on" if self.app.watching else "Auto-clip off"))
+        self.hint_l.config(text=f"Save clip: {clip}   ·   Record: {rec}   ·   {ac}\n{mode}{enc}")
         self.buf_b.config(text="Turn off" if r.running else "Turn on", kind="normal" if r.running else "accent")
         self.save_b.config(state="normal" if r.running else "disabled")
         self.rec_b.config(text="■  Stop" if r.recording else "●  Record", kind="accent" if r.recording else "danger")
@@ -763,9 +771,12 @@ class RecorderPage(VideosPage):
             pass
 
 
+AUTO_MIN = {1: "Every kill", 2: "2 kills or more", 3: "3 kills or more", 4: "4 kills or more", 5: "Aces only"}
+
+
 class AutoPage(Page):
     title = "Auto-clip"
-    subtitle = "Breachcut watches Medal while you play and edits your best rounds by itself."
+    subtitle = "While you play, Breachcut spots your kills on screen, saves the plays and edits the best ones by itself."
 
     def __init__(self, app):
         super().__init__(app)
@@ -799,12 +810,13 @@ class AutoPage(Page):
         om = tk.OptionMenu(opts, self.mk, "3K or better", "4K or better", "Aces only", command=lambda *_: self.save_opts())
         om.config(bg=CARD_HI, fg=TEXT, relief="flat", bd=0, highlightthickness=0, activebackground="#342b45", font=(FONT, 10))
         om.grid(row=2, column=1, sticky="w")
-        tk.Label(opts, text="Check every (minutes)", fg=MUTED, bg=BG, font=(FONT, 10)).grid(row=3, column=0, sticky="w", pady=6)
-        self.ev = tk.StringVar(value=str(app.s["watch_minutes"]))
-        e = tk.Entry(opts, textvariable=self.ev, width=6, bg=CARD, fg=TEXT, insertbackground=TEXT, relief="flat",
-                     font=(FONT, 10))
-        e.grid(row=3, column=1, sticky="w", ipady=4)
-        e.bind("<FocusOut>", lambda ev: self.save_opts())
+        tk.Label(opts, text="Save a clip when I get", fg=MUTED, bg=BG, font=(FONT, 10)).grid(row=3, column=0,
+                                                                                          sticky="w", pady=6)
+        self.ac = tk.StringVar(value=AUTO_MIN.get(app.s.get("auto_clip_min", 2), "2 kills or more"))
+        om2 = tk.OptionMenu(opts, self.ac, *AUTO_MIN.values(), command=lambda *_: self.save_opts())
+        om2.config(bg=CARD_HI, fg=TEXT, relief="flat", bd=0, highlightthickness=0, activebackground="#342b45",
+                   font=(FONT, 10))
+        om2.grid(row=3, column=1, sticky="w")
         tk.Label(opts, text="Uses your default look (set it in the editor with “Save as my default look”).",
                  fg=DIM, bg=BG, font=(FONT, 9)).grid(row=4, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
@@ -827,16 +839,15 @@ class AutoPage(Page):
 
     def save_opts(self):
         self.app.s["min_kills"] = {"3K or better": 3, "4K or better": 4, "Aces only": 5}[self.mk.get()]
-        try:
-            self.app.s["watch_minutes"] = max(1, int(self.ev.get()))
-        except ValueError:
-            pass
+        self.app.s["auto_clip_min"] = {v: k for k, v in AUTO_MIN.items()}.get(self.ac.get(), 2)
         core.save_settings(self.app.s)
 
     def refresh(self):
         on = self.app.watching
-        self.state_l.config(text=("●  Auto-clip is ON — keep Medal running and play" if on else "○  Auto-clip is off"),
-                            fg=GOOD if on else TEXT)
+        rec = self.app.rec.running
+        txt = ("●  Auto-clip is ON — just play, your kills get saved" if on and rec else
+               "●  Auto-clip is ON — starts when Siege opens" if on else "○  Auto-clip is off")
+        self.state_l.config(text=txt, fg=GOOD if on else TEXT)
         self.toggle_b.config(text="Turn off" if on else "Turn on")
         self.log.config(text="\n".join(self.app.activity[-14:]) or "Nothing yet.")
 
@@ -845,7 +856,7 @@ class AutoPage(Page):
         for k, v in self.fv.items():
             v.set(k in (s.get("auto_formats") or []))
         self.mk.set({3: "3K or better", 4: "4K or better", 5: "Aces only"}.get(s["min_kills"], "3K or better"))
-        self.ev.set(str(s["watch_minutes"]))
+        self.ac.set(AUTO_MIN.get(s.get("auto_clip_min", 2), "2 kills or more"))
         for tg in self.toggles:
             tg._draw()
         self.refresh()
@@ -961,14 +972,20 @@ class App:
         self.images = {}
         self.sel = None
         self.sel_kind = None
-        self.watching = False
+        self.watching = bool(self.s.get("auto_clip", True))
+        self.scanning = set()
         self.activity = []
         self.patch = None
         if self.user and not self.s.get("onboarded"):
-            # signed in with Discord: use their name for the intro and find Medal automatically
+            # signed in with Discord: use their name for the intro, nothing else to set up
             self.s["creator"] = self.s.get("creator") or self.user["name"]
-            self.s["medal_dir"] = core.find_medal_dir()
-            self.s["onboarded"] = os.path.isdir(os.path.join(self.s["medal_dir"], "Databases"))
+            self.s["onboarded"] = True
+            core.save_settings(self.s)
+        if not self.s.get("own_v1"):                 # 1.7: Breachcut records by itself, no Medal
+            for k in ("medal_dir", "modes", "watch_minutes"):
+                self.s.pop(k, None)
+            self.s.setdefault("clips_dir", os.path.join(self.s.get("library_dir") or core.default_library(), "Clips"))
+            self.s["own_v1"] = True
             core.save_settings(self.s)
         if not self.s.get("rec_v1"):                 # 1.6: recorder keys moved off Medal's F8
             if self.s.get("hk_clip") in (None, "F8"):
@@ -993,6 +1010,7 @@ class App:
         threading.Thread(target=self._storage_check, daemon=True).start()
         self._bind_hotkeys()
         threading.Thread(target=self._game_watch, daemon=True).start()
+        self.root.after(20000, self._auto_tick)
         if self.session:
             threading.Thread(target=self._sync_profile, daemon=True).start()
         if not self.s.get("onboarded"):
@@ -1109,11 +1127,11 @@ class App:
 
     # ---------------------------------------------------------------- data
     def reload(self):
-        self.status("Reading Medal's clips…")
+        self.status("Loading your clips…")
 
         def work():
             try:
-                clips = core.read_clips(self.s["medal_dir"])
+                clips = core.read_clips(self.s)
                 clips = [c for c in clips if os.path.exists(c["path"])]
                 self.q.put(("clips", clips))
             except Exception as e:
@@ -1186,17 +1204,47 @@ class App:
         kind, op, mp = core.parts(c)
         self.v_title.config(text=" · ".join(x for x in (kind or "Clip", op, mp) if x))
         when = core.clip_time(c).strftime("%A, %b %d · %I:%M %p").replace(" 0", " ")
-        kills = "   ".join(fmt_time(k).split(".")[0] for k in c["kills"]) or "none logged"
-        self.v_info.config(text=f"{when}\nKills at   {kills}\n{c['mode']}")
+        kills = "   ".join(fmt_time(k).split(".")[0] for k in c["kills"][:12]) or (
+            "none found" if c.get("scanned", True) else "still looking…")
+        if len(c["kills"]) > 12:
+            kills += f"   +{len(c['kills']) - 12} more"
+        kind = {"auto": "Auto-clip", "recording": "Recording"}.get(c.get("kind"), "Clip")
+        self.v_info.config(text=f"{when}\nKills at   {kills}\n{kind}")
         tt, yt = self.made(c), self.made(c, "wide")
         self._actions([
             ("★  Remake TikTok" if tt else "★  Make TikTok", lambda: self.make(c, "vertical"), "accent"),
             ("▭  Remake YouTube video" if yt else "▭  Make YouTube video", lambda: self.make(c, "wide"), "normal"),
             ("✂  Edit & customize", lambda: self.open_editor(c), "normal"),
             ("⤢  Open in Windows player", lambda: startfile(c["path"]), "ghost"),
+            ("🎯  Find kills again", lambda: self.rescan(c), "ghost"),
+            ("🗑  Delete clip", lambda: self.delete_clip(c), "danger"),
         ])
         done = [n for n, p in (("TikTok", tt), ("YouTube", yt)) if p]
         self.v_status.config(text=("✓ Already made: " + " + ".join(done)) if done else "", fg=GOOD)
+
+    def rescan(self, c):
+        if self.rec.running:
+            messagebox.showinfo(core.APP_NAME, "Breachcut finds kills in saved clips while the recorder is off, so your "
+                                               "game stays smooth. Turn the recorder off (Recorder tab) and try again.",
+                                parent=self.root)
+            return
+        self.scanning.add(c["path"])
+        self.jobs.put(("killscan", c))
+        self.v_status.config(text="Looking for kills… this takes about as long as the clip.", fg=ACCENT)
+
+    def delete_clip(self, c):
+        if not messagebox.askyesno(core.APP_NAME, f"Delete this clip?\n\n{os.path.basename(c['path'])}\n\n"
+                                                  "Videos you already made from it stay.", parent=self.root):
+            return
+        self.player.stop()
+        self.player.unload()
+        try:
+            os.remove(c["path"])
+        except OSError as e:
+            messagebox.showerror(core.APP_NAME, f"Couldn't delete it: {e}")
+            return
+        self.clear_viewer()
+        self.reload()
 
     def select_video(self, v):
         self.sel, self.sel_kind = v, "video"
@@ -1213,7 +1261,7 @@ class App:
                 pass
             self.v_info.config(text=f"Your recording\n{when}")
             self._actions([
-                ("✂  Make a TikTok / YouTube video", lambda: self.open_editor(recorder.recording_clip(v["path"])),
+                ("✂  Make a TikTok / YouTube video", lambda: self.open_editor(recorder.recording_clip(v["path"], self.s)),
                  "accent"),
                 ("📂  Show in folder", lambda: show_in_folder(v["path"]), "normal"),
                 ("⤢  Open in Windows player", lambda: startfile(v["path"]), "normal"),
@@ -1249,7 +1297,7 @@ class App:
 
     def delete_video(self, v):
         if not messagebox.askyesno(core.APP_NAME, f"Delete this video?\n\n{os.path.basename(v['path'])}\n\n"
-                                                  "Your original Medal clip stays.", parent=self.root):
+                                                  "Your original clip stays.", parent=self.root):
             return
         self.player.stop()
         try:
@@ -1274,17 +1322,28 @@ class App:
     # ---------------------------------------------------------------- auto + actions
     def toggle_auto(self):
         self.watching = not self.watching
+        self.s["auto_clip"] = self.watching
+        core.save_settings(self.s)
         self._paint_pill()
-        self.status("Auto-clip on — checking Medal for new highlights." if self.watching else "Auto-clip off.", log=True)
         if self.watching:
-            self._auto_tick()
+            self.status("Auto-clip on — your multi-kills save by themselves while you play.", log=True)
+            if not self.rec.running and self.s.get("rec_mode", "siege") != "off" and (
+                    self._game_on or self.s.get("rec_mode") == "always"):
+                self._rec_bg(self.rec.start)
+        else:
+            self.status("Auto-clip off. Your clip hotkey still works.", log=True)
         self.pages["auto"].refresh()
 
     def _auto_tick(self):
-        if not self.watching:
-            return
-        self.jobs.put(("scan", None))
-        self.root.after(max(1, int(self.s.get("watch_minutes", 5))) * 60000, self._auto_tick)
+        """Look for clips that still need their kills found (older recordings, imported videos)."""
+        if self.s.get("scan_old", True) and self.s.get("kill_detect", True):
+            todo = [c for c in self.clips if not c.get("scanned") and c["path"] not in self.scanning
+                    and time.time() - os.path.getmtime(c["path"]) > 30] if self.clips else []
+            if todo and not self.rec.running:          # don't take CPU away from the game
+                c = todo[0]
+                self.scanning.add(c["path"])
+                self.jobs.put(("killscan", c))
+        self.root.after(60000, self._auto_tick)
 
     def aim_short(self, fmt="vertical"):
         self.jobs.put(("short", fmt))
@@ -1383,7 +1442,7 @@ class App:
             self._ob_mark = ImageTk.PhotoImage(Image.open(mk).resize((84, 84), Image.LANCZOS))
             tk.Label(w, image=self._ob_mark, bg=PANEL).pack(pady=(22, 6))
         tk.Label(w, text=f"Welcome to {core.APP_NAME}", fg=TEXT, bg=PANEL, font=(FONT, 17, "bold")).pack()
-        tk.Label(w, text="Turns your Siege clips from Medal into TikToks, Shorts and YouTube edits.",
+        tk.Label(w, text="Records your Siege kills and turns them into TikToks, Shorts and YouTube edits.",
                  fg=MUTED, bg=PANEL, font=(FONT, 10)).pack(pady=(2, 18))
         f = tk.Frame(w, bg=PANEL)
         f.pack(fill="x", padx=36)
@@ -1392,17 +1451,11 @@ class App:
         e = tk.Entry(f, textvariable=name, bg=CARD, fg=TEXT, insertbackground=TEXT, relief="flat", font=(FONT, 12))
         e.pack(fill="x", ipady=6, pady=(4, 14))
         e.focus_set()
-        tk.Label(f, text="Medal folder", fg=TEXT, bg=PANEL, font=(FONT, 10)).pack(anchor="w")
-        md = tk.StringVar(value=core.find_medal_dir() if not os.path.isdir(self.s["medal_dir"]) else self.s["medal_dir"])
-        r = tk.Frame(f, bg=PANEL)
-        r.pack(fill="x", pady=(4, 0))
-        tk.Entry(r, textvariable=md, bg=CARD, fg=TEXT, insertbackground=TEXT, relief="flat", font=(FONT, 10)).pack(
-            side="left", fill="x", expand=True, ipady=5)
-        button(r, "…", lambda: md.set(filedialog.askdirectory(parent=w) or md.get()), small=True).pack(side="left", padx=(6, 0))
-
+        tk.Label(f, text="That's it. Open Siege and play: Breachcut starts recording by itself, spots your kills and "
+                         "saves the plays. Press F10 any time to save the last 30 seconds.", fg=MUTED, bg=PANEL,
+                 font=(FONT, 9), wraplength=480, justify="left").pack(anchor="w")
         def go():
             self.s["creator"] = name.get().strip()
-            self.s["medal_dir"] = md.get().strip()
             self.s["onboarded"] = True
             core.save_settings(self.s)
             w.grab_release()
@@ -1455,7 +1508,9 @@ class App:
 
     # ---------------------------------------------------------------- recorder
     def _bind_hotkeys(self):
-        self.hotkeys.set({"clip": self.s.get("hk_clip"), "record": self.s.get("hk_record")})
+        self.hotkeys.set({"clip": self.s.get("hk_clip"), "record": self.s.get("hk_record"),
+                          "clip_short": self.s.get("hk_clip_short"), "clip_long": self.s.get("hk_clip_long"),
+                          "buffer": self.s.get("hk_buffer"), "autoclip": self.s.get("hk_autoclip")})
 
     def _game_watch(self):
         while True:
@@ -1488,13 +1543,15 @@ class App:
             self.status("Starting the recorder…")
             self._rec_bg(self.rec.start)
 
-    def rec_save(self):
+    def rec_save(self, seconds=None):
         if not self.rec.running:
             self.status("The replay buffer is off. Turn it on in the Recorder tab first.")
             self._beep(False)
             return
         self.status("Saving clip…")
-        self.rec.save_replay()
+        if self.s.get("hotkey_sound", True):
+            self._beep(True)
+        self.rec.save_replay(seconds)
 
     def rec_toggle_record(self):
         if not self.rec.recording:
@@ -1509,12 +1566,21 @@ class App:
             except Exception:
                 pass
 
+    RESTART_KEYS = ("rec_fps", "rec_bitrate", "rec_resolution", "rec_encoder", "rec_codec", "rec_preset", "rec_rc",
+                    "rec_capture", "rec_monitor", "rec_cursor", "rec_audio_kbps", "rec_game_audio", "rec_game_vol",
+                    "rec_mic", "mic_device", "mic_vol", "mic_noise", "mic_gate", "mic_mono", "separate_tracks",
+                    "kill_detect", "kill_sensitivity")
+
     def settings_changed(self, key):
-        if key in ("hk_clip", "hk_record"):
+        if key and key.startswith("hk_"):
             self._bind_hotkeys()
-        elif key in ("rec_fps", "rec_bitrate", "rec_resolution", "rec_encoder", "rec_game_audio", "rec_game_vol",
-                     "rec_mic", "mic_device", "mic_vol", "separate_tracks"):
+        elif key in self.RESTART_KEYS:
             self._rec_bg(self.rec.restart)
+        elif key == "auto_clip":
+            self.watching = bool(self.s.get("auto_clip"))
+            self._paint_pill()
+        if self.current == "recorder":
+            self.pages["recorder"].refresh_state()
         if self.current == "recorder":
             self.pages["recorder"].refresh_state()
 
@@ -1618,13 +1684,14 @@ class App:
                     settings = dict(self.s)
                     if arg:
                         settings["only_new_after"] = arg
-                    clips = core.read_clips(self.s["medal_dir"])
-                    new = [c for c in core.pick_new_highlights(clips, settings, self.state)
-                           if os.path.exists(c["path"]) and time.time() - os.path.getmtime(c["path"]) > 90]
+                    clips = core.read_clips(self.s)
+                    kinds = None if arg else ("auto",)        # "from my last X days" takes every clip
+                    new = [c for c in core.pick_new_highlights(clips, settings, self.state, kinds)
+                           if os.path.exists(c["path"])]
                     core.save_state(self.state)
                     fmts = self.s.get("auto_formats") or ["vertical"]
-                    if not new:
-                        self.q.put(("log", "Checked Medal — no new highlights."))
+                    if not new and arg:
+                        self.q.put(("log", "No new highlights to edit."))
                     for i, c in enumerate(new, 1):
                         for fmt in fmts:
                             self.q.put(("status", f"Editing highlight {i}/{len(new)} ({'YouTube' if fmt == 'wide' else 'TikTok'})…"))
@@ -1633,6 +1700,17 @@ class App:
                             self.q.put(("made", (c["id"], out)))
                     if new:
                         self.q.put(("reload", None))
+                elif kind == "killscan":
+                    c = arg
+                    self.q.put(("status", f"Finding kills in {os.path.basename(c['path'])}…"))
+                    kills = killfeed.scan_file(c["path"], self.s.get("kill_sensitivity", "Normal"),
+                                               stop=lambda: self.rec.running)
+                    if not self.rec.running:
+                        core.write_meta(c["path"], {"kills": kills, "dur": core.probe_duration(c["path"])})
+                        self.q.put(("log", f"Found {len(kills)} kill{'s' if len(kills) != 1 else ''} in "
+                                           f"{os.path.basename(c['path'])}"))
+                        self.q.put(("reload", None))
+                    self.scanning.discard(c["path"])
             except Exception as e:
                 self.q.put(("error", str(e)[-400:]))
 
@@ -1642,16 +1720,16 @@ class App:
                 kind, val = self.q.get_nowait()
                 if kind == "clips":
                     self.clips = val
-                    self.clips_msg = "No Siege clips in Medal yet." if not val else ""
-                    self.status(f"{len(val)} Siege clips from Medal.")
+                    self.clips_msg = ("No clips yet. Open Siege and play — your kills save here by themselves, or "
+                                      "press your clip hotkey.") if not val else ""
+                    self.status(f"{len(val)} clip{'s' if len(val) != 1 else ''} in your library.")
                     self.pages["clips"].apply()
                     if self.current == "home":
                         self.pages["home"].render()
                 elif kind == "noclips":
                     self.clips = []
-                    self.clips_msg = (f"Couldn't find Medal's clips.\n{val}\n\n"
-                                      "Check the Medal folder in Settings (it's usually C:\\Medal).")
-                    self.status("Couldn't read Medal — check Settings.")
+                    self.clips_msg = f"Couldn't load your clips.\n{val}"
+                    self.status("Couldn't load your clips — check Settings → Storage.")
                     self.pages["clips"].apply()
                 elif kind == "thumb":
                     self.pages["clips"].set_thumb(*val)
@@ -1660,14 +1738,27 @@ class App:
                         self.pages[k].set_thumb(*val)
                 elif kind == "rec":
                     k, v = val
-                    if k == "saved":
-                        what = "Recording" if " Recording " in os.path.basename(v) else "Clip"
+                    if k in ("saved", "saved_auto"):
+                        meta = core.read_meta(v) or {}
+                        n = len(meta.get("kills") or [])
+                        what = "Recording" if meta.get("kind") == "recording" else (
+                            f"Auto-clip ({n} kills)" if k == "saved_auto" else "Clip")
                         self.status(f"✅ {what} saved: {os.path.basename(v)}", log=True)
-                        if self.s.get("notify_made", True):
+                        if self.s.get("notify_clip", True):
                             self.notify(f"{what} saved", os.path.basename(v), v)
                         threading.Thread(target=self._storage_check, daemon=True).start()
+                        self.reload()
+                        if k == "saved_auto" and self.s.get("auto_make", True):
+                            self.jobs.put(("scan", None))
                         if self.current == "recorder":
                             self.pages["recorder"].render()
+                    elif k == "kill":
+                        self._kills_today = getattr(self, "_kills_today", 0) + 1
+                        if self.s.get("kill_sound"):
+                            self._beep(True)
+                        if self.s.get("notify_kill"):
+                            self.notify("Kill" if v <= 1 else f"{v} kills in a row!", "Breachcut spotted it.")
+                        self.status(f"🎯 Kill spotted ({v} this play)")
                     elif k == "error":
                         self.status("⚠ " + v, log=True)
                         self._beep(False)
@@ -1678,8 +1769,17 @@ class App:
                 elif kind == "hotkey":
                     if val == "clip":
                         self.rec_save()
+                    elif val == "clip_short":
+                        self.rec_save(15)
+                    elif val == "clip_long":
+                        self.rec_save(120)
                     elif val == "record":
                         self.rec_toggle_record()
+                    elif val == "buffer":
+                        self.rec_toggle_buffer()
+                    elif val == "autoclip":
+                        self.toggle_auto()
+                        self._beep(self.watching)
                 elif kind == "hotkey_fail":
                     self.status(f"⚠ Another app is already using {val[1]}. Pick a different key in Settings → Hotkeys.",
                                 log=True)
