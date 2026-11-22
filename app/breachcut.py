@@ -30,6 +30,7 @@ from editor import Editor
 from player import Player, fmt as fmt_time
 
 PAGE = 45
+DISCORD_URL = "https://discord.gg/2VRaRjQNkT"
 
 
 def startfile(path):
@@ -1408,7 +1409,8 @@ class App:
             m.add_separator()
         m.add_command(label="  Settings", command=lambda: self.show("settings"))
         m.add_command(label="  Check for updates", command=self.manual_update_check)
-        m.add_command(label="  Join the Discord (help & bug reports)", command=lambda: __import__("webbrowser").open("https://discord.gg/2VRaRjQNkT"))
+        m.add_command(label="  Report a bug", command=self.report_bug)
+        m.add_command(label="  Join the Discord", command=lambda: __import__("webbrowser").open(DISCORD_URL))
         m.add_command(label="  Privacy policy", command=lambda: __import__("webbrowser").open(auth.PRIVACY_URL))
         m.add_separator()
         if self.user:
@@ -1487,6 +1489,78 @@ class App:
             self.reload()
         button(w, "Let's go", go, "accent").pack(pady=22)
         w.bind("<Return>", lambda ev: go())
+
+    # ---------------------------------------------------------------- bug reports
+    def report_bug(self):
+        old = getattr(self, "_bug_win", None)
+        if old is not None:
+            try:
+                old.lift()
+                return
+            except tk.TclError:
+                pass
+        w = tk.Toplevel(self.root, bg=PANEL)
+        self._bug_win = w
+        w.title("Report a bug")
+        w.geometry("520x470")
+        w.transient(self.root)
+        tk.Label(w, text="Report a bug", fg=TEXT, bg=PANEL, font=(FONT, 16, "bold")).pack(anchor="w", padx=24, pady=(20, 2))
+        tk.Label(w, text="What happened, and what were you doing right before? The more detail the faster it gets fixed.",
+                 fg=MUTED, bg=PANEL, font=(FONT, 9), wraplength=470, justify="left").pack(anchor="w", padx=24)
+        box = tk.Text(w, height=10, bg=CARD, fg=TEXT, insertbackground=TEXT, relief="flat", font=(FONT, 10),
+                      wrap="word", padx=8, pady=6)
+        box.pack(fill="both", expand=True, padx=24, pady=(10, 8))
+        box.focus_set()
+        inc = tk.BooleanVar(value=True)
+        tk.Checkbutton(w, text="Include the recorder log (helps fix recording problems)", variable=inc,
+                       fg=TEXT, bg=PANEL, selectcolor=CARD, activebackground=PANEL, activeforeground=TEXT,
+                       font=(FONT, 9), bd=0, highlightthickness=0).pack(anchor="w", padx=20)
+        msg = tk.Label(w, text="" if self.session else "You're not signed in, so this opens our Discord instead.",
+                       fg=MUTED, bg=PANEL, font=(FONT, 9), wraplength=470, justify="left")
+        msg.pack(anchor="w", padx=24, pady=(6, 0))
+        row = tk.Frame(w, bg=PANEL)
+        row.pack(fill="x", padx=24, pady=14)
+
+        def close():
+            self._bug_win = None
+            try:
+                w.destroy()
+            except tk.TclError:
+                pass
+
+        def send():
+            text = box.get("1.0", "end").strip()
+            if not self.session:
+                __import__("webbrowser").open(DISCORD_URL)
+                close()
+                return
+            if len(text) < 5:
+                msg.config(text="Write a little about what went wrong first.", fg=WARN)
+                return
+            msg.config(text="Sending…", fg=MUTED)
+            want_log = inc.get()
+
+            def work():
+                log = ""
+                if want_log:
+                    try:
+                        with open(os.path.join(core.APP_DIR, "recorder.log"), encoding="utf-8", errors="replace") as f:
+                            log = f.read()[-20000:]
+                    except OSError:
+                        pass
+                import platform
+                ok, m = auth.send_bug_report(self.session, text, app_version=updater.local_version(),
+                                             log_tail=log, os_name=platform.platform())
+                self.q.put(("bugsent", (ok, m)))
+            threading.Thread(target=work, daemon=True).start()
+
+        self._bug_msg, self._bug_close = msg, close
+        button(row, "Send report", send, "accent").pack(side="right")
+        button(row, "Cancel", close).pack(side="right", padx=8)
+        tk.Label(row, text="Or ask in Discord", fg=ACCENT_HI, bg=PANEL, font=(FONT, 9, "underline"),
+                 cursor="hand2").pack(side="left")
+        row.winfo_children()[-1].bind("<Button-1>", lambda e: __import__("webbrowser").open(DISCORD_URL))
+        w.protocol("WM_DELETE_WINDOW", close)
 
     # ---------------------------------------------------------------- updates
     def _check_update(self, manual=False):
@@ -1875,6 +1949,18 @@ class App:
                 elif kind == "storage":
                     if self.current in ("tiktok", "youtube"):
                         self.pages[self.current].render()
+                elif kind == "bugsent":
+                    ok, m = val
+                    self.status(m, log=True)
+                    if ok:
+                        if getattr(self, "_bug_close", None):
+                            self._bug_close()
+                        self.notify("Bug report sent", "Thanks! We'll look at it.", sound="made")
+                    elif getattr(self, "_bug_win", None) is not None:
+                        try:
+                            self._bug_msg.config(text=m, fg=WARN)
+                        except tk.TclError:
+                            pass
                 elif kind == "patched":
                     self.status(f"Updated to {self.patch['version']}! Restarting…")
                     self.root.update_idletasks()
