@@ -1,4 +1,4 @@
-"""Breachcut Settings - Medal-style: a list of sections on the left, cards of options on the right.
+"""Breachcut Settings - a list of sections on the left, cards of options on the right.
 Every option saves as soon as you change it.
 """
 import os
@@ -21,7 +21,8 @@ from ui_kit import (ACCENT, BG, CARD, CARD_HI, DIM, FONT, FONT_BOLD, FONT_SEMI, 
 SECTIONS = (
     ("general", "⚙", "General"),
     ("intro", "✦", "Your intro"),
-    ("clips", "🎯", "Clips"),
+    ("autoclip", "🎯", "Auto-clip"),
+    ("clips", "🎬", "Clips & videos"),
     ("editing", "✂", "Editing & export"),
     ("video", "🎥", "Video"),
     ("audio", "🔊", "Audio"),
@@ -31,10 +32,6 @@ SECTIONS = (
     ("account", "👤", "Account"),
     ("about", "ⓘ", "About"),
 )
-
-MODES = (("Ranked", ("Ranked",)), ("Unranked", ("Unranked",)), ("Quick Match", ("QuickMatch", "Quick Match")),
-         ("Standard", ("Standard",)), ("Arcade", ("Arcade",)))
-
 
 # ---------------------------------------------------------------- Windows startup
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
@@ -239,7 +236,7 @@ def make_settings_page(Page, ScrollGrid):
             getattr(self, "_" + key)()
 
         def on_show(self):
-            if self.cur in ("storage", "account", "clips"):
+            if self.cur in ("storage", "account", "clips", "autoclip"):
                 self.open(self.cur)
 
         def save(self, key=None, value=None, msg="Saved"):
@@ -362,16 +359,6 @@ def make_settings_page(Page, ScrollGrid):
             self.s["style"] = st
             self.save()
 
-        def soon(self):
-            f = tk.Frame(self.body, bg="#1a1430", highlightthickness=1, highlightbackground="#3a2d6b")
-            f.pack(fill="x", padx=(0, 14), pady=(4, 6))
-            tk.Label(f, text="●  Built-in recorder — coming next update", fg="#b9a8ff", bg="#1a1430",
-                     font=(FONT_SEMI, 10)).pack(anchor="w", padx=16, pady=(10, 0))
-            tk.Label(f, text="Set these now. They're saved and the recorder will use them the moment it arrives. "
-                             "Until then Breachcut uses the clips Medal records.",
-                     fg=MUTED, bg="#1a1430", font=(FONT, 9), wraplength=600, justify="left").pack(anchor="w", padx=16,
-                                                                                                pady=(2, 10))
-
         # ------------------------------------------------ sections
         def _general(self):
             self.heading("General", "How Breachcut starts and stays up to date.")
@@ -389,17 +376,10 @@ def make_settings_page(Page, ScrollGrid):
                         "New versions install when Breachcut opens. Turn off to get a banner and choose when.")
             r = self.row(c, f"You're on version {updater.local_version()}")
             RoundButton(r, "Check for updates", self.app.manual_update_check, small=True, bg=CARD).pack()
-            c = self.card("Medal")
-            self.folder(c, "medal_dir", "Medal folder", "Where Medal keeps its clips (usually C:\\Medal).",
-                        after=lambda p: self.app.reload())
-            r = self.row(c, "Can't find it?", "Let Breachcut look in the usual places.")
-
-            def detect():
-                d = core.find_medal_dir()
-                self.save("medal_dir", d, f"Medal folder: {d}")
-                self.app.reload()
-                self.open("general")
-            RoundButton(r, "Find Medal for me", detect, small=True, bg=CARD).pack()
+            c = self.card("While you play")
+            self.toggle(c, "notify_clip", "Pop-up when a clip is saved",
+                        "A small note in the corner of your screen. It never steals focus from the game.")
+            self.toggle(c, "hotkey_sound", "Sound when I press a hotkey", "So you know the clip saved.")
 
         def _intro(self):
             self.heading("Your intro", "The glowing title at the start of every video.")
@@ -462,9 +442,28 @@ def make_settings_page(Page, ScrollGrid):
                 self.save("voice_file", f)
                 self.open("intro")
 
-        def _clips(self):
-            self.heading("Clips", "Which Medal clips Breachcut turns into videos.")
-            c = self.card("Auto-clip makes")
+        def _autoclip(self):
+            self.heading("Auto-clip", "Breachcut watches the score feed on your screen. When “+100 Kill” pops up it "
+                                      "knows you got a kill, and after a good play it saves the clip by itself.")
+            c = self.card("Auto-clip")
+            self.toggle(c, "auto_clip", "Save my plays automatically",
+                        "Works while the recorder is on. Your clip hotkey works either way.")
+            self.choice(c, "auto_clip_min", "Save a clip when I get", [1, 2, 3, 4, 5],
+                        shown={1: "Every kill", 2: "2 kills or more", 3: "3 kills or more", 4: "4 kills or more",
+                               5: "Aces only"})
+            self.choice(c, "streak_gap", "Kills count as one play if they're within", [10, 15, 25, 40, 60, 90],
+                        "Longer = whole rounds land in one clip.",
+                        shown={10: "10 seconds", 15: "15 seconds", 25: "25 seconds", 40: "40 seconds",
+                               60: "1 minute", 90: "1.5 minutes"})
+            self.slider(c, "auto_pre", "Keep before the first kill", 2, 30, "The lead-up to the play.",
+                        fmt=lambda v: f"{v:.0f} s")
+            self.slider(c, "auto_post", "Keep after the last kill", 1, 15, "Let the moment breathe.",
+                        fmt=lambda v: f"{v:.0f} s")
+            c = self.card("Make videos by themselves")
+            self.toggle(c, "auto_make", "Turn big plays into videos",
+                        "Edits them with your default look right after the clip saves.")
+            self.choice(c, "min_kills", "Make a video when I get", [3, 4, 5],
+                        shown={3: "3K or better", 4: "4K or better", 5: "Aces only"})
             for key, label, help_text in (("vertical", "TikTok / Shorts", "Vertical 1080×1920."),
                                           ("wide", "YouTube widescreen", "16:9 1920×1080.")):
                 right = self.row(c, label, help_text)
@@ -476,39 +475,47 @@ def make_settings_page(Page, ScrollGrid):
                         f.append(key)
                     self.save("auto_formats", f)
                 Toggle(right, bv, command=flip, bg=CARD).pack()
-            c = self.card("What counts")
-            self.choice(c, "min_kills", "Make a video when I get", [3, 4, 5],
-                        shown={3: "3K or better", 4: "4K or better", 5: "Aces only"})
-            right = self.row(c, "Game modes", "Clips from other modes are skipped.")
-            have = set(self.s.get("modes") or [])
-            for label, raws in MODES:
-                bv = tk.BooleanVar(value=any(x in have for x in raws))
+            c = self.card("Kill detection")
+            self.toggle(c, "kill_detect", "Spot my kills on screen",
+                        "Only looks at the picture, like any recorder. It never touches the game, so it's BattlEye-safe.")
+            self.choice(c, "kill_sensitivity", "Sensitivity", ["Low", "Normal", "High"],
+                        "Missing kills? Try High. Getting fake ones? Try Low.")
+            self.toggle(c, "kill_sound", "Tick sound on every kill", "Handy to check it's working.")
+            self.toggle(c, "notify_kill", "Pop-up on every kill")
+            self.toggle(c, "scan_old", "Find kills in older recordings",
+                        "Looks through recordings that don't have kills marked yet — only while you're not playing.")
+            tk.Label(self.body, text="Kill detection reads Siege's “+100 Kill” cards. Keep the score feed turned on in "
+                                     "Siege's HUD settings so Breachcut can see them.", fg=MUTED, bg=BG,
+                     font=(FONT, 9), wraplength=640, justify="left").pack(anchor="w", pady=(4, 8))
 
-                def flip(raws=raws, bv=bv):
-                    m = [x for x in (self.s.get("modes") or []) if x not in raws]
-                    if bv.get():
-                        m += list(raws)
-                    self.save("modes", m)
-                cb = CheckBox(right, bv, label, bg=CARD, command=flip, fg=TEXT)
-                cb.config(width=110)
-                cb.pack(side="left")
-            c = self.card("Cutting")
+        def _clips(self):
+            self.heading("Clips & videos", "How clips are saved and cut into videos.")
+            c = self.card("Saving clips")
+            self.choice(c, "replay_seconds", "Clip hotkey saves the last", [10, 15, 20, 30, 45, 60, 90, 120, 180, 300],
+                        shown={10: "10 seconds", 15: "15 seconds", 20: "20 seconds", 30: "30 seconds",
+                               45: "45 seconds", 60: "1 minute", 90: "1.5 minutes", 120: "2 minutes",
+                               180: "3 minutes", 300: "5 minutes"})
+            self.choice(c, "clip_name", "File names", ["Breachcut {kind} {date} {time}", "Siege {kind} {date} {time}",
+                                                       "{date} {time} {kind}"],
+                        shown={"Breachcut {kind} {date} {time}": "Breachcut Clip 2026-11-21 21-07",
+                               "Siege {kind} {date} {time}": "Siege Clip 2026-11-21 21-07",
+                               "{date} {time} {kind}": "2026-11-21 21-07 Clip"}, width=260)
+            self.folder(c, "clips_dir", "Clips folder", "Where saved clips and auto-clips go.",
+                        after=lambda p: self.app.reload())
+            c = self.card("Cutting kills into videos")
             self.slider(c, "clip_pre", "Time before each kill", 1, 6, "How much lead-up to keep.", step=0.2,
                         fmt=lambda v: f"{v:.1f} s")
             self.slider(c, "clip_post", "Time after each kill", 0.2, 3, "How long to hold after the kill.", step=0.1,
                         fmt=lambda v: f"{v:.1f} s")
-            c = self.card("Auto-clip")
-            self.choice(c, "watch_minutes", "Check Medal every", [1, 2, 5, 10, 15],
-                        shown={1: "1 minute", 2: "2 minutes", 5: "5 minutes", 10: "10 minutes", 15: "15 minutes"})
             since = self.s.get("only_new_after") or ""
             try:
                 since_txt = datetime.fromisoformat(since).strftime("%b %d, %Y %I:%M %p")
             except ValueError:
                 since_txt = "the start"
-            r = self.row(c, "Only clips from", f"Auto-clip ignores clips older than {since_txt}.")
+            r = self.row(c, "Only make videos from clips after", f"Auto videos ignore clips older than {since_txt}.")
 
             def reset():
-                self.save("only_new_after", datetime.now().isoformat(timespec="seconds"), "Auto-clip starts from now")
+                self.save("only_new_after", datetime.now().isoformat(timespec="seconds"), "Auto videos start from now")
                 self.open("clips")
             RoundButton(r, "Start from now", reset, small=True, bg=CARD).pack()
 
@@ -550,24 +557,42 @@ def make_settings_page(Page, ScrollGrid):
                         shown={"Auto": "Auto", "GPU": "GPU (NVIDIA)", "CPU": "CPU"})
 
         def _video(self):
-            self.heading("Video", "Recording quality for the built-in recorder.")
+            self.heading("Video", "Recording quality for the built-in recorder. Changes apply right away.")
             c = self.card("Replay buffer")
             self.choice(c, "rec_mode", "Record when", ["siege", "always", "off"],
-                        "The replay buffer keeps the last moments so your clip hotkey can save them.",
+                        "The replay buffer keeps the last moments so hotkeys and auto-clip can save them.",
                         shown={"siege": "Siege is running", "always": "Breachcut is open", "off": "Only when I press record"},
                         width=230)
-            self.choice(c, "replay_seconds", "Clip length", [15, 30, 60, 120, 300],
-                        "How much is saved when you press the clip hotkey.",
-                        shown={15: "15 seconds", 30: "30 seconds", 60: "1 minute", 120: "2 minutes", 300: "5 minutes"})
             c = self.card("Quality")
-            self.choice(c, "rec_resolution", "Resolution", ["Native", "1440p", "1080p", "720p"])
-            self.choice(c, "rec_fps", "Frame rate", [30, 60, 120], shown={30: "30 fps", 60: "60 fps", 120: "120 fps"})
-            self.slider(c, "rec_bitrate", "Bitrate", 5, 80, "Higher is sharper but makes bigger files.",
+            self.choice(c, "rec_resolution", "Resolution", ["Native", "2160p", "1440p", "1080p", "900p", "720p", "480p"],
+                        "Native = your screen's own size.",
+                        shown={"Native": "Native", "2160p": "4K (2160p)", "1440p": "1440p", "1080p": "1080p",
+                               "900p": "900p", "720p": "720p", "480p": "480p"})
+            self.choice(c, "rec_fps", "Frame rate", [30, 60, 90, 120, 144],
+                        shown={30: "30 fps", 60: "60 fps", 90: "90 fps", 120: "120 fps", 144: "144 fps"})
+            self.slider(c, "rec_bitrate", "Bitrate", 5, 150, "Higher is sharper but makes bigger files. "
+                                                             "30–50 is great for 1080p, 80+ for 1440p/4K.",
                         suffix=" Mbps")
+            self.choice(c, "rec_rc", "Bitrate mode", ["CBR", "VBR"],
+                        shown={"CBR": "Constant (steady)", "VBR": "Variable (smaller files)"})
+            c = self.card("Encoder")
             self.choice(c, "rec_encoder", "Encoder", ["Auto", "NVIDIA", "AMD", "Intel", "CPU"],
                         "Auto picks your graphics card so the game stays smooth.")
+            self.choice(c, "rec_codec", "Format", ["H.264", "HEVC"],
+                        "H.264 plays everywhere. HEVC is sharper at the same size (needs a newer graphics card).",
+                        shown={"H.264": "H.264 (AVC)", "HEVC": "HEVC (H.265)"})
+            self.choice(c, "rec_preset", "Encoder preset", ["Performance", "Balanced", "Quality"],
+                        "Performance uses the least power; Quality looks best.")
+            c = self.card("Capture")
+            self.choice(c, "rec_capture", "Capture method", ["Auto", "Compatibility"],
+                        "Try Compatibility if recordings come out black.",
+                        shown={"Auto": "Auto (fastest)", "Compatibility": "Compatibility"})
+            self.choice(c, "rec_monitor", "Monitor", [0, 1, 2, 3],
+                        shown={0: "Main monitor", 1: "Monitor 2", 2: "Monitor 3", 3: "Monitor 4"})
+            self.toggle(c, "rec_cursor", "Show the mouse cursor")
             c = self.card("Folder")
-            self.folder(c, "recordings_dir", "Recordings", "Where recorded clips are saved.")
+            self.folder(c, "recordings_dir", "Recordings", "Where full recordings are saved.",
+                        after=lambda p: self.app.reload())
 
         def _audio(self):
             self.heading("Audio", "What the recorder captures.")
@@ -582,9 +607,14 @@ def make_settings_page(Page, ScrollGrid):
                           lambda v: self.save("mic_device", v), width=260, bg=CARD)
             dd.pack()
             self.slider(c, "mic_vol", "Mic volume", 0, 200, suffix="%")
+            self.toggle(c, "mic_noise", "Noise suppression", "Cuts fans, keyboard and background hiss.")
+            self.toggle(c, "mic_gate", "Noise gate", "Mutes the mic between words.")
+            self.toggle(c, "mic_mono", "Mono mic", "Puts your voice in both ears (most mics are mono).")
             c = self.card("Tracks")
             self.toggle(c, "separate_tracks", "Separate audio tracks",
                         "Keep game and mic on their own tracks so you can mute one later.")
+            self.choice(c, "rec_audio_kbps", "Audio quality", [128, 160, 192, 256, 320],
+                        shown={128: "128 kbps", 160: "160 kbps", 192: "192 kbps", 256: "256 kbps", 320: "320 kbps"})
 
             def load():
                 devs = core.audio_devices()
@@ -604,14 +634,16 @@ def make_settings_page(Page, ScrollGrid):
         def _hotkeys(self):
             self.heading("Hotkeys", "Click a key, then press the new one. Esc cancels, Backspace clears.")
             c = self.card()
-            for key, label, help_text in (("hk_clip", "Save a clip", "Saves the last moments from the replay buffer."),
-                                          ("hk_record", "Start / stop recording", "Records until you press it again.")):
+            for key, label, help_text in (
+                    ("hk_clip", "Save a clip", "Saves the last moments (length is in Clips & videos)."),
+                    ("hk_clip_short", "Save the last 15 seconds", "A quick clip of just that moment."),
+                    ("hk_clip_long", "Save the last 2 minutes", "For the whole round."),
+                    ("hk_record", "Start / stop recording", "Records until you press it again."),
+                    ("hk_buffer", "Turn the replay buffer on / off", ""),
+                    ("hk_autoclip", "Turn auto-clip on / off", "")):
                 right = self.row(c, label, help_text)
                 HotkeyButton(right, self.s.get(key) or "None",
                              lambda v, key=key, label=label: self.save(key, v, f"{label} → {v}"), bg=CARD).pack()
-            tk.Label(self.body, text="Tip: Medal uses F8 to clip. If Medal is running too, keep these on different keys "
-                                     "so one press doesn't save two clips.", fg=MUTED, bg=BG, font=(FONT, 9),
-                     wraplength=640, justify="left").pack(anchor="w", pady=(4, 0))
             tk.Label(self.body, text="Hotkeys use Windows' normal hotkey system — Breachcut never reads the game, "
                                      "so it's safe with BattlEye.", fg=DIM, bg=BG, font=(FONT, 9)).pack(anchor="w",
                                                                                                      pady=6)
@@ -677,7 +709,7 @@ def make_settings_page(Page, ScrollGrid):
                 if os.path.basename(os.path.normpath(target)).lower() != core.APP_NAME.lower():
                     target = os.path.join(target, core.APP_NAME)
             if not messagebox.askyesno(core.APP_NAME, f"Move all Breachcut videos to\n{target} ?\n\n"
-                                                      "Your Medal clips aren't touched."):
+                                                      "Your clips and videos aren't touched."):
                 return
             self.app.status("Moving your videos…")
 
@@ -761,9 +793,9 @@ def make_settings_page(Page, ScrollGrid):
             info.pack(side="left", padx=14)
             tk.Label(info, text=core.APP_NAME, fg=TEXT, bg=CARD, font=(FONT_BOLD, 18)).pack(anchor="w")
             tk.Label(info, text=f"Version {updater.local_version()}", fg=MUTED, bg=CARD, font=(FONT, 10)).pack(anchor="w")
-            tk.Label(c, text="Turns your Rainbow Six Siege Medal clips into TikToks, Shorts and YouTube videos.\n"
+            tk.Label(c, text="Records Rainbow Six Siege, spots your kills and turns them into TikToks, Shorts and YouTube videos.\n"
                              "Reads clips only — never touches the game, so it's safe with BattlEye.\n"
-                             "Not affiliated with Ubisoft or Medal.", fg=MUTED, bg=CARD, font=(FONT, 9),
+                             "Not affiliated with Ubisoft.", fg=MUTED, bg=CARD, font=(FONT, 9),
                      justify="left").pack(anchor="w", pady=(4, 10))
             r = self.row(c, "Updates")
             RoundButton(r, "Check for updates", self.app.manual_update_check, small=True, bg=CARD).pack()
