@@ -67,6 +67,22 @@ def has_filter(name):
     return r.returncode == 0 and "Unknown filter" not in (r.stdout + r.stderr)
 
 
+# Older FFmpeg needs a bigger input queue for live audio; FFmpeg 9 removed that option for inputs.
+IN_QUEUE = []
+
+
+def _set_in_queue():
+    global IN_QUEUE
+    ff = core.find_ffmpeg()
+    try:
+        r = subprocess.run([ff, "-hide_banner", "-loglevel", "error", "-thread_queue_size", "64", "-f", "lavfi", "-i",
+                            "anullsrc", "-t", "0.1", "-f", "null", "-"], capture_output=True, text=True, timeout=20,
+                           creationflags=core.NO_WINDOW)
+        IN_QUEUE = ["-thread_queue_size", "4096"] if r.returncode == 0 else []
+    except Exception:
+        IN_QUEUE = []
+
+
 def encoder_works(codec):
     """Try a tiny encode so we only pick a GPU encoder this PC really has."""
     if codec in _enc_cache:
@@ -283,6 +299,9 @@ class Recorder:
         self.saving = False
         self.last_error = ""
         self.detect = False
+        self.safe_level = 0          # goes up if the recorder keeps failing: 1 no mic extras, 2 no mic,
+        #                              3 no kill detection, 4 basic CPU recording
+        self.started_at = 0.0
         self.kills = []              # kill times (seconds since the buffer started) seen this session
         self.kf = None
         self.auto_done_until = -1.0  # kills up to here were already handled by auto-clip
@@ -292,6 +311,9 @@ class Recorder:
         s = self.s
         fps = int(s.get("rec_fps") or 60)
         mbps = int(s.get("rec_bitrate") or 20)
+        lvl = self.safe_level
+        if lvl >= 4:                      # last resort: plain CPU H.264 so it always records
+            self.codec = "libx264"
         self.codec = self.codec or pick_encoder(s.get("rec_encoder", "Auto"), s.get("rec_codec", "H.264"))
         cmd = [ff, "-hide_banner", "-loglevel", "error", "-y"]
         vf = []
@@ -300,7 +322,7 @@ class Recorder:
         method = s.get("rec_capture", "Auto")
         if self.video_source:
             cmd += self.video_source
-        elif method != "Compatibility" and has_filter("ddagrab"):
+        elif method != "Compatibility" and lvl < 4 and has_filter("ddagrab"):
             cmd += ["-f", "lavfi", "-i", f"ddagrab=output_idx={mon}:framerate={fps}:draw_mouse={mouse}"]
             vf.append("hwdownload,format=bgra")
         else:
@@ -312,14 +334,14 @@ class Recorder:
             enc_vf.append(f"scale=-2:'min(ih,{res})':flags=bicubic")
         if not self.codec.endswith("nvenc"):
             enc_vf.append("format=nv12" if any(x in self.codec for x in ("amf", "qsv")) else "format=yuv420p")
-        self.detect = bool(s.get("kill_detect", True)) and not s.get("_no_detect")
+        self.detect = bool(s.get("kill_detect", True)) and not s.get("_no_detect") and lvl < 3
         n = 1
         g_in = m_in = None
-        if loop_rate:
-            cmd += ["-thread_queue_size", "4096", "-f", "s16le", "-ar", str(loop_rate), "-ac", str(loop_ch), "-i", "pipe:0"]
+        if loop_rate and lvl < 4:
+            cmd += IN_QUEUE + ["-f", "s16le", "-ar", str(loop_rate), "-ac", str(loop_ch), "-i", "pipe:0"]
             g_in, n = n, n + 1
-        if mic:
-            cmd += ["-thread_queue_size", "4096", "-f", "dshow", "-audio_buffer_size", "50", "-i", f"audio={mic}"]
+        if mic and lvl < 2:
+            cmd += IN_QUEUE + ["-f", "dshow", "-audio_buffer_size", "50", "-i", f"audio={mic}"]
             m_in, n = n, n + 1
         base = ",".join(vf) if vf else "null"
         if self.detect:
@@ -335,12 +357,13 @@ class Recorder:
             fc.append(f"[{g_in}:a]aresample=48000,aformat=channel_layouts=stereo,volume={gv}[g]")
         if m_in is not None:
             mf = ["aresample=48000:async=1"]
-            if s.get("mic_noise"):
+            if s.get("mic_noise") and lvl < 1:
                 mf.append("afftdn=nf=-25")
-            if s.get("mic_gate"):
+            if s.get("mic_gate") and lvl < 1:
                 mf.append("agate=threshold=0.02:ratio=4:attack=5:release=200")
-            mf.append("aformat=channel_layouts=stereo" if not s.get("mic_mono", True) else
-                      "pan=mono|c0=0.5*c0+0.5*c1,aformat=channel_layouts=stereo")
+            if s.get("mic_mono", True):
+                mf.append("aformat=channel_layouts=mono")       # works for mono and stereo mics
+            mf.append("aformat=channel_layouts=stereo")
             mf.append(f"volume={mv}")
             fc.append(f"[{m_in}:a]{','.join(mf)}[m]")
         maps = ["-map", "[v]"]
@@ -395,6 +418,9 @@ class Recorder:
                 if not killfeed.ensure_numpy():
                     self.on_event("info", "Couldn't set up kill detection. Clips still save with your hotkey.")
             self.s["_no_detect"] = killfeed.np is None
+            if not getattr(self, "_queue_checked", False):
+                _set_in_queue()
+                self._queue_checked = True
             cmd = self.build(ff, loop.rate if loop else None, loop.ch if loop else None, mic)
             self.kills, self.auto_done_until, self.kf = [], -1.0, None
             try:
@@ -409,6 +435,8 @@ class Recorder:
                 return False
             self.loop = loop
             self.running = True
+            self.started_at = time.time()
+            self._log("start (safe level %d): %s" % (self.safe_level, subprocess.list2cmdline(cmd)))
             if loop:
                 threading.Thread(target=loop.pump, args=(self.proc.stdin,), daemon=True).start()
             threading.Thread(target=self._watch, args=(self.proc,), daemon=True).start()
@@ -449,12 +477,24 @@ class Recorder:
 
     def restart(self):
         """Apply new settings (quality, audio...) by restarting the buffer."""
+        self.safe_level = 0
         if self.running and not self.recording:
             self.stop()
             self.codec = None
             self.start()
         else:
             self.codec = None
+
+    def _log(self, text):
+        """Keep a small log next to the app so problems can be looked at later."""
+        try:
+            p = os.path.join(core.APP_DIR, "recorder.log")
+            if os.path.exists(p) and os.path.getsize(p) > 400_000:
+                os.replace(p, p + ".old")
+            with open(p, "a", encoding="utf-8") as f:
+                f.write(f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {text}\n")
+        except Exception:
+            pass
 
     def _watch(self, proc):
         err = proc.stderr.read().decode("utf-8", "ignore") if proc.stderr else ""
@@ -465,6 +505,17 @@ class Recorder:
             if self.loop:
                 self.loop.close()
             self.last_error = err.strip()[-400:]
+            self._log(f"stopped with code {proc.returncode}:\n{err.strip()[-3000:]}")
+            quick = time.time() - self.started_at < 20
+            if quick and self.safe_level < 4:
+                # it died right away: try again with fewer extras instead of giving up
+                self.safe_level += 1
+                self.codec = None
+                self._log(f"retrying with safe level {self.safe_level}")
+                self.on_event("state", None)
+                time.sleep(1)
+                self.start()
+                return
             self.on_event("error", "The recorder stopped: " + (self.last_error.splitlines()[-1] if self.last_error
                                                               else "unknown error"))
             self.on_event("state", None)
