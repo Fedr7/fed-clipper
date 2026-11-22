@@ -19,6 +19,7 @@ import auth
 import autoclip_core as core
 import login
 import killfeed
+import sounds
 import recorder
 import settings_page
 import updater
@@ -38,6 +39,25 @@ def startfile(path):
         subprocess.Popen(["xdg-open", path])
     except OSError as e:
         messagebox.showerror(core.APP_NAME, str(e))
+
+
+def show_no_focus(win):
+    """Show a pop-up window WITHOUT taking focus from the game (no tab-out)."""
+    if os.name != "nt":
+        win.deiconify()
+        return
+    try:
+        import ctypes
+        win.update_idletasks()
+        u = ctypes.windll.user32
+        hwnd = u.GetAncestor(win.winfo_id(), 2) or win.winfo_id()      # GA_ROOT
+        GWL_EXSTYLE, NOACTIVATE, TOOLWINDOW, TOPMOST = -20, 0x08000000, 0x00000080, 0x00000008
+        u.SetWindowLongW(hwnd, GWL_EXSTYLE, u.GetWindowLongW(hwnd, GWL_EXSTYLE) | NOACTIVATE | TOOLWINDOW | TOPMOST)
+        u.ShowWindow(hwnd, 4)                                           # SW_SHOWNOACTIVATE
+        u.SetWindowPos(hwnd, -1, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010 | 0x0040)  # TOPMOST, no move/size/activate
+        win.update_idletasks()
+    except Exception:
+        win.deiconify()
 
 
 def show_in_folder(path):
@@ -1009,6 +1029,7 @@ class App:
         threading.Thread(target=self._check_update, daemon=True).start()
         threading.Thread(target=self._storage_check, daemon=True).start()
         self._bind_hotkeys()
+        threading.Thread(target=sounds.prepare, daemon=True).start()
         threading.Thread(target=self._game_watch, daemon=True).start()
         self.root.after(20000, self._auto_tick)
         if self.session:
@@ -1547,30 +1568,29 @@ class App:
     def rec_save(self, seconds=None):
         if not self.rec.running:
             self.status("The replay buffer is off. Turn it on in the Recorder tab first.")
-            self._beep(False)
+            self.notify("Recorder is off", "Turn it on in Breachcut's Recorder tab.", sound="error")
             return
         self.status("Saving clip…")
-        if self.s.get("hotkey_sound", True):
-            self._beep(True)
         self.rec.save_replay(seconds)
 
     def rec_toggle_record(self):
-        if not self.rec.recording:
+        was = self.rec.recording
+        if not was:
             self._rec_manual = self._rec_manual or not self.rec.running
         self._rec_bg(self.rec.toggle_recording)
+        self.notify("■ Recording stopped" if was else "● Recording", "Saving it now…" if was else
+                    f"Press {self.s.get('hk_record') or 'your record key'} again to stop.",
+                    sound="record_off" if was else "record_on")
 
-    def _beep(self, good=True):
+    def _beep(self, good=True, name=None):
+        """Breachcut's own sounds (not the Windows ding)."""
         if not good:
             # error sounds: never while Siege is open, and at most once every 5 minutes
             if self._game_on or time.time() - getattr(self, "_last_err_beep", 0) < 300:
                 return
             self._last_err_beep = time.time()
         if self.s.get("notify_sound", True):
-            try:
-                import winsound
-                winsound.MessageBeep(winsound.MB_OK if good else winsound.MB_ICONHAND)
-            except Exception:
-                pass
+            sounds.play(name or ("clip" if good else "error"))
 
     RESTART_KEYS = ("rec_fps", "rec_bitrate", "rec_resolution", "rec_encoder", "rec_codec", "rec_preset", "rec_rc",
                     "rec_capture", "rec_monitor", "rec_cursor", "rec_audio_kbps", "rec_game_audio", "rec_game_vol",
@@ -1608,17 +1628,14 @@ class App:
         except Exception:
             pass
 
-    def notify(self, title, body="", path=None):
-        """Small pop-up in the bottom-right corner of the screen (works while the app is minimized)."""
-        if self._game_on and getattr(self, "_quiet_in_game", True):
-            self._beep(True)                 # in game: just a sound, never a window over Siege
+    def notify(self, title, body="", path=None, sound="clip"):
+        """Small pop-up that never takes focus. In game it's a slim card in the top-right corner so it doesn't
+        cover the kill feed or tab you out of Siege."""
+        if sound:
+            self._beep(True, sound)
+        in_game = bool(self._game_on)
+        if in_game and not self.s.get("ingame_popup", True):
             return
-        if self.s.get("notify_sound", True):
-            try:
-                import winsound
-                winsound.MessageBeep(winsound.MB_ICONASTERISK)
-            except Exception:
-                pass
         old = getattr(self, "_toast", None)
         if old is not None:
             try:
@@ -1626,40 +1643,52 @@ class App:
             except tk.TclError:
                 pass
         t = tk.Toplevel(self.root)
+        t.withdraw()
         self._toast = t
         t.overrideredirect(True)
         t.configure(bg=ACCENT)
         try:
             t.attributes("-topmost", True)
+            t.attributes("-alpha", 0.92 if in_game else 0.98)
         except tk.TclError:
             pass
-        w, h = 360, 86
         sw, sh = t.winfo_screenwidth(), t.winfo_screenheight()
-        t.geometry(f"{w}x{h}+{sw - w - 24}+{sh - h - 64}")
+        if in_game:
+            w, h = 270, 50
+            x, y = sw - w - 18, int(sh * 0.12)        # below the top-right corner, clear of the score feed
+        else:
+            w, h = 360, 86
+            x, y = sw - w - 24, sh - h - 64
+        t.geometry(f"{w}x{h}+{x}+{y}")
         f = tk.Frame(t, bg=PANEL)
-        f.pack(fill="both", expand=True, padx=(4, 1), pady=1)
+        f.pack(fill="both", expand=True, padx=(4 if not in_game else 3, 1), pady=1)
         mark = os.path.join(core.ASSETS, "breachcut_mark.png")
+        size = 26 if in_game else 40
         if os.path.exists(mark):
-            t._img = ImageTk.PhotoImage(Image.open(mark).convert("RGBA").resize((40, 40), Image.LANCZOS))
-            tk.Label(f, image=t._img, bg=PANEL).pack(side="left", padx=(14, 10))
+            t._img = ImageTk.PhotoImage(Image.open(mark).convert("RGBA").resize((size, size), Image.LANCZOS))
+            tk.Label(f, image=t._img, bg=PANEL).pack(side="left", padx=(10, 8) if in_game else (14, 10))
         txt = tk.Frame(f, bg=PANEL)
-        txt.pack(side="left", fill="both", expand=True, pady=14)
-        tk.Label(txt, text=title, fg=TEXT, bg=PANEL, font=(FONT_SEMI, 10), anchor="w").pack(fill="x")
-        tk.Label(txt, text=body[:60], fg=MUTED, bg=PANEL, font=(FONT, 9), anchor="w").pack(fill="x")
-        x = tk.Label(f, text="✕", fg=DIM, bg=PANEL, font=(FONT, 10), cursor="hand2")
-        x.pack(side="right", anchor="n", padx=10, pady=8)
-        x.bind("<Button-1>", lambda e: t.destroy())
+        txt.pack(side="left", fill="both", expand=True, pady=6 if in_game else 14)
+        tk.Label(txt, text=title, fg=TEXT, bg=PANEL, font=(FONT_SEMI, 10 if not in_game else 9),
+                 anchor="w").pack(fill="x")
+        tk.Label(txt, text=body[:42 if in_game else 60], fg=MUTED, bg=PANEL, font=(FONT, 8 if in_game else 9),
+                 anchor="w").pack(fill="x")
+        if not in_game:
+            xb = tk.Label(f, text="✕", fg=DIM, bg=PANEL, font=(FONT, 10), cursor="hand2")
+            xb.pack(side="right", anchor="n", padx=10, pady=8)
+            xb.bind("<Button-1>", lambda e: t.destroy())
 
-        def click(e):
-            t.destroy()
-            if path and os.path.exists(path):
-                show_in_folder(path)
-            else:
-                self.root.deiconify()
-                self.root.lift()
-        for wdg in (f, txt) + tuple(txt.winfo_children()):
-            wdg.bind("<Button-1>", click)
-        t.after(6000, lambda: t.winfo_exists() and t.destroy())
+            def click(e):
+                t.destroy()
+                if path and os.path.exists(path):
+                    show_in_folder(path)
+                else:
+                    self.root.deiconify()
+                    self.root.lift()
+            for wdg in (f, txt) + tuple(txt.winfo_children()):
+                wdg.bind("<Button-1>", click)
+        show_no_focus(t)
+        t.after(2600 if in_game else 6000, lambda: t.winfo_exists() and t.destroy())
 
     # ---------------------------------------------------------------- workers
     def ensure_enc(self):
@@ -1751,7 +1780,10 @@ class App:
                             f"Auto-clip ({n} kills)" if k == "saved_auto" else "Clip")
                         self.status(f"✅ {what} saved: {os.path.basename(v)}", log=True)
                         if self.s.get("notify_clip", True):
-                            self.notify(f"{what} saved", os.path.basename(v), v)
+                            self.notify(f"✓ {what} saved", f"{n} kill{'s' if n != 1 else ''}" if n else
+                                        os.path.basename(v), v, sound="auto" if k == "saved_auto" else "clip")
+                        else:
+                            self._beep(True, "auto" if k == "saved_auto" else "clip")
                         threading.Thread(target=self._storage_check, daemon=True).start()
                         self.reload()
                         if k == "saved_auto" and self.s.get("auto_make", True):
@@ -1760,10 +1792,11 @@ class App:
                             self.pages["recorder"].render()
                     elif k == "kill":
                         self._kills_today = getattr(self, "_kills_today", 0) + 1
-                        if self.s.get("kill_sound"):
-                            self._beep(True)
                         if self.s.get("notify_kill"):
-                            self.notify("Kill" if v <= 1 else f"{v} kills in a row!", "Breachcut spotted it.")
+                            self.notify("🎯 Kill" if v <= 1 else f"🎯 {v} kills this play", "Breachcut spotted it.",
+                                        sound="kill" if self.s.get("kill_sound") else None)
+                        elif self.s.get("kill_sound"):
+                            self._beep(True, "kill")
                         self.status(f"🎯 Kill spotted ({v} this play)")
                     elif k == "error":
                         self.status("⚠ " + v, log=True)
@@ -1805,7 +1838,7 @@ class App:
                     cid, out = val
                     self.status(f"✅ Saved {os.path.basename(out)}", log=True)
                     if self.s.get("notify_made", True):
-                        self.notify("Your video is ready", os.path.basename(out), out)
+                        self.notify("Your video is ready", os.path.basename(out), out, sound="made")
                     threading.Thread(target=self._storage_check, daemon=True).start()
                     if cid and self.sel_kind == "clip" and self.sel and self.sel["id"] == cid:
                         self.select_clip(self.sel)
@@ -1827,7 +1860,8 @@ class App:
                 elif kind == "patch":
                     self._show_patch(val)
                     if self.s.get("notify_update", True):
-                        self.notify(f"Update {val['version']} is ready", val.get("notes") or "Click Update now to install.")
+                        self.notify(f"Update {val['version']} is ready", val.get("notes") or "Click Update now to install.",
+                                    sound=None)
                 elif kind == "autoupdate":
                     self.patch = val
                     if self._game_on or self.rec.running:
