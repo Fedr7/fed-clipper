@@ -1520,7 +1520,8 @@ class App:
                 want = mode == "always" or (mode == "siege" and self._game_on)
                 if not want:
                     self._rec_user_off = False
-                if want and not self.rec.running and not self._rec_user_off:
+                failed = time.time() - getattr(self, "_rec_failed_at", 0) < 600
+                if want and not self.rec.running and not self._rec_user_off and not failed:
                     self.q.put(("rec_auto", "start"))
                 elif not want and self.rec.running and not self.rec.recording and not self._rec_manual:
                     self.q.put(("rec_auto", "stop"))
@@ -1559,6 +1560,11 @@ class App:
         self._rec_bg(self.rec.toggle_recording)
 
     def _beep(self, good=True):
+        if not good:
+            # error sounds: never while Siege is open, and at most once every 5 minutes
+            if self._game_on or time.time() - getattr(self, "_last_err_beep", 0) < 300:
+                return
+            self._last_err_beep = time.time()
         if self.s.get("notify_sound", True):
             try:
                 import winsound
@@ -1761,6 +1767,8 @@ class App:
                         self.status(f"🎯 Kill spotted ({v} this play)")
                     elif k == "error":
                         self.status("⚠ " + v, log=True)
+                        if v.startswith("The recorder stopped"):
+                            self._rec_failed_at = time.time()     # don't keep restarting it in a loop
                         self._beep(False)
                     elif k == "info":
                         self.status(v)
@@ -1822,7 +1830,9 @@ class App:
                         self.notify(f"Update {val['version']} is ready", val.get("notes") or "Click Update now to install.")
                 elif kind == "autoupdate":
                     self.patch = val
-                    if self.jobs.empty():
+                    if self._game_on or self.rec.running:
+                        self._show_patch(val)            # never restart while you're playing
+                    elif self.jobs.empty():
                         self.status(f"Installing update {val['version']}…")
                         self._do_update()
                     else:
@@ -1831,7 +1841,8 @@ class App:
                     if self.current in ("tiktok", "youtube"):
                         self.pages[self.current].render()
                 elif kind == "patched":
-                    messagebox.showinfo(core.APP_NAME, f"Updated to {self.patch['version']}! Restarting…")
+                    self.status(f"Updated to {self.patch['version']}! Restarting…")
+                    self.root.update_idletasks()
                     updater.restart()
                     self.root.destroy()
                     return
@@ -1853,6 +1864,9 @@ def main():
         app = App(root, session, online)
         if "--startup" in sys.argv and app.s.get("start_minimized"):
             root.iconify()
+            return
+        if recorder.game_running():
+            root.iconify()          # Siege is open: start in the taskbar instead of jumping over the game
             return
         root.deiconify()
         try:
