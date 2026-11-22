@@ -1408,6 +1408,7 @@ class App:
             m.add_separator()
         m.add_command(label="  Settings", command=lambda: self.show("settings"))
         m.add_command(label="  Check for updates", command=self.manual_update_check)
+        m.add_command(label="  Join the Discord (help & bug reports)", command=lambda: __import__("webbrowser").open("https://discord.gg/2VRaRjQNkT"))
         m.add_command(label="  Privacy policy", command=lambda: __import__("webbrowser").open(auth.PRIVACY_URL))
         m.add_separator()
         if self.user:
