@@ -1,7 +1,8 @@
 {
-  "version": "1.7.1",
-  "notes": "Fixes the recorder not starting on newer FFmpeg, stops error pings and never tabs you out of Siege.",
+  "version": "1.7.2",
+  "notes": "Breachcut's own clip sounds and a small in-game pop-up that never tabs you out.",
   "files": [
+    "sounds.py",
     "killfeed.py",
     "recorder.py",
     "breachcut.py",
