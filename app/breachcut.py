@@ -18,6 +18,7 @@ from PIL import Image, ImageDraw, ImageTk
 import auth
 import autoclip_core as core
 import login
+import recorder
 import settings_page
 import updater
 import ui_kit as ui
@@ -690,6 +691,78 @@ class YouTubePage(VideosPage):
         return f"{n} Short{'s' if n != 1 else ''} — same vertical videos as your TikToks"
 
 
+class RecorderPage(VideosPage):
+    title = "Recorder"
+    subtitle = "Save your best moments with a hotkey, or record whole rounds."
+    fmt = "wide"
+    empty_text = ("No recordings yet.\nPress your clip hotkey in game to save the last moments, or hit  ●  Record.")
+
+    def __init__(self, app):
+        super().__init__(app)
+        button(self.head_right, "📂  Open folder", lambda: app.open_dir(app.s["recordings_dir"]),
+               small=True).pack(side="right")
+        button(self.head_right, "⚙  Recorder settings", self.open_settings, small=True).pack(side="right", padx=6)
+        card = tk.Frame(self, bg=CARD, highlightthickness=1, highlightbackground=LINE)
+        card.pack(fill="x", padx=(28, 22), pady=(10, 4))
+        self.dot = tk.Canvas(card, width=22, height=22, bg=CARD, highlightthickness=0, bd=0)
+        self.dot.pack(side="left", padx=(18, 12), pady=20)
+        txt = tk.Frame(card, bg=CARD)
+        txt.pack(side="left", fill="x", expand=True)
+        self.state_l = tk.Label(txt, text="", fg=TEXT, bg=CARD, font=(FONT_BOLD, 14), anchor="w")
+        self.state_l.pack(fill="x")
+        self.hint_l = tk.Label(txt, text="", fg=MUTED, bg=CARD, font=(FONT, 9), anchor="w", justify="left")
+        self.hint_l.pack(fill="x")
+        btns = tk.Frame(card, bg=CARD)
+        btns.pack(side="right", padx=14)
+        self.buf_b = RoundButton(btns, "Turn on", app.rec_toggle_buffer, small=True, bg=CARD, width=120)
+        self.buf_b.pack(side="left", padx=4)
+        self.save_b = RoundButton(btns, "⤓  Save clip", app.rec_save, small=True, bg=CARD, width=120)
+        self.save_b.pack(side="left", padx=4)
+        self.rec_b = RoundButton(btns, "●  Record", app.rec_toggle_record, kind="danger", small=True, bg=CARD,
+                                 width=120)
+        self.rec_b.pack(side="left", padx=4)
+        self.grid.pack(fill="both", expand=True, padx=(22, 6), pady=(8, 6))
+        self.after(1000, self._tick)
+
+    def open_settings(self):
+        self.app.show("settings")
+        self.app.pages["settings"].open("video")
+
+    def videos(self):
+        return recorder.list_recordings(self.app.s)
+
+    def subtitle_for(self, n):
+        return f"{n} recording{'s' if n != 1 else ''}  ·  click one to watch it or turn it into a TikTok / YouTube video"
+
+    def on_show(self):
+        self.refresh_state()
+        self.render()
+
+    def refresh_state(self):
+        r = self.app.rec
+        col = WARN if r.recording else (GOOD if r.running else DIM)
+        self.dot.delete("all")
+        self.dot.create_oval(3, 3, 19, 19, fill=col, outline="")
+        self.state_l.config(text=r.status_text())
+        clip, rec = self.app.s.get("hk_clip") or "None", self.app.s.get("hk_record") or "None"
+        mode = {"siege": "Turns on by itself when Siege opens.", "always": "On whenever Breachcut is open.",
+                "off": "Only records when you press Record."}.get(self.app.s.get("rec_mode", "siege"), "")
+        enc = f"  ·  Encoding on {recorder.encoder_name(r.codec)}" if r.codec else ""
+        self.hint_l.config(text=f"Save clip: {clip}   ·   Record: {rec}   ·   {mode}{enc}")
+        self.buf_b.config(text="Turn off" if r.running else "Turn on", kind="normal" if r.running else "accent")
+        self.save_b.config(state="normal" if r.running else "disabled")
+        self.rec_b.config(text="■  Stop" if r.recording else "●  Record", kind="accent" if r.recording else "danger")
+
+    def _tick(self):
+        try:
+            if self.winfo_exists():
+                if getattr(self.app, "current", None) == "recorder":
+                    self.refresh_state()
+                self.after(1000, self._tick)
+        except tk.TclError:
+            pass
+
+
 class AutoPage(Page):
     title = "Auto-clip"
     subtitle = "Breachcut watches Medal while you play and edits your best rounds by itself."
@@ -897,7 +970,19 @@ class App:
             self.s["medal_dir"] = core.find_medal_dir()
             self.s["onboarded"] = os.path.isdir(os.path.join(self.s["medal_dir"], "Databases"))
             core.save_settings(self.s)
+        if not self.s.get("rec_v1"):                 # 1.6: recorder keys moved off Medal's F8
+            if self.s.get("hk_clip") in (None, "F8"):
+                self.s["hk_clip"] = "F10"
+            if self.s.get("hk_record") in (None, "F9"):
+                self.s["hk_record"] = "Shift+F10"
+            self.s["rec_v1"] = True
+            core.save_settings(self.s)
+        self.rec = recorder.Recorder(self.s, lambda k, v: self.q.put(("rec", (k, v))))
+        self.hotkeys = recorder.Hotkeys(lambda name: self.q.put(("hotkey", name)),
+                                        on_fail=lambda n, c: self.q.put(("hotkey_fail", (n, c))))
+        self._rec_manual = self._rec_user_off = self._game_on = False
         self._build()
+        self.root.bind("<Destroy>", lambda e: self._shutdown_recorder() if e.widget is self.root else None)
         threading.Thread(target=self._job_worker, daemon=True).start()
         threading.Thread(target=self._thumb_worker, daemon=True).start()
         self.root.after(100, self._pump)
@@ -906,6 +991,8 @@ class App:
         self.reload()
         threading.Thread(target=self._check_update, daemon=True).start()
         threading.Thread(target=self._storage_check, daemon=True).start()
+        self._bind_hotkeys()
+        threading.Thread(target=self._game_watch, daemon=True).start()
         if self.session:
             threading.Thread(target=self._sync_profile, daemon=True).start()
         if not self.s.get("onboarded"):
@@ -928,7 +1015,8 @@ class App:
         tk.Label(side, text="MENU", fg=DIM, bg=SIDE, font=(FONT_SEMI, 8)).pack(anchor="w", padx=26, pady=(0, 6))
         self.nav = {}
         for key, icon, text in (("home", "⌂", "Home"), ("clips", "🎬", "Clips"), ("tiktok", "📱", "TikTok"),
-                                ("youtube", "▶", "YouTube"), ("auto", "⚡", "Auto-clip"), ("settings", "⚙", "Settings")):
+                                ("youtube", "▶", "YouTube"), ("recorder", "🎥", "Recorder"), ("auto", "⚡", "Auto-clip"),
+                                ("settings", "⚙", "Settings")):
             item = NavItem(side, icon, text, lambda k=key: self.show(k))
             item.pack(fill="x", padx=12, pady=1)
             self.nav[key] = item
@@ -967,7 +1055,8 @@ class App:
         self.statusbar = tk.Label(self.main, text="", fg=MUTED, bg=BG, font=(FONT, 9), anchor="w")
         self.statusbar.pack(side="bottom", fill="x", padx=28, pady=(0, 10))
         self.pages = {"home": HomePage(self), "clips": ClipsPage(self), "tiktok": TikTokPage(self),
-                      "youtube": YouTubePage(self), "auto": AutoPage(self), "settings": SettingsPage(self)}
+                      "youtube": YouTubePage(self), "recorder": RecorderPage(self), "auto": AutoPage(self),
+                      "settings": SettingsPage(self)}
         self.current = None
 
     def _wheel(self, e):
@@ -1111,8 +1200,26 @@ class App:
 
     def select_video(self, v):
         self.sel, self.sel_kind = v, "video"
-        for k in ("tiktok", "youtube"):
+        for k in ("tiktok", "youtube", "recorder"):
             self.pages[k].mark_selected()
+        if v.get("kind") == "recording":
+            self.player.resize(400, 225)
+            self.player.load(v["path"], play=False)
+            self.v_title.config(text=VideosPage.short_title(v))
+            when = v.get("made_at", "")
+            try:
+                when = datetime.fromisoformat(when).strftime("%A, %b %d · %I:%M %p").replace(" 0", " ")
+            except Exception:
+                pass
+            self.v_info.config(text=f"Your recording\n{when}")
+            self._actions([
+                ("✂  Make a TikTok / YouTube video", lambda: self.open_editor(recorder.recording_clip(v["path"])),
+                 "accent"),
+                ("📂  Show in folder", lambda: show_in_folder(v["path"]), "normal"),
+                ("⤢  Open in Windows player", lambda: startfile(v["path"]), "normal"),
+                ("🗑  Delete recording", lambda: self.delete_video(v), "danger")])
+            self.v_status.config(text="")
+            return
         if v.get("fmt") == "wide":
             self.player.resize(400, 225)
         else:
@@ -1300,9 +1407,8 @@ class App:
             core.save_settings(self.s)
             w.grab_release()
             w.destroy()
-            self.pages["settings"].vals["creator"].set(self.s["creator"])
-            self.pages["settings"].vals["medal_dir"].set(self.s["medal_dir"])
-            self.pages["settings"].refresh_labels()
+            if self.current == "settings":
+                self.pages["settings"].open(self.pages["settings"].cur)
             self.reload()
         button(w, "Let's go", go, "accent").pack(pady=22)
         w.bind("<Return>", lambda ev: go())
@@ -1347,6 +1453,81 @@ class App:
                 self.q.put(("error", f"Update failed (nothing changed): {e}"))
         threading.Thread(target=work, daemon=True).start()
 
+    # ---------------------------------------------------------------- recorder
+    def _bind_hotkeys(self):
+        self.hotkeys.set({"clip": self.s.get("hk_clip"), "record": self.s.get("hk_record")})
+
+    def _game_watch(self):
+        while True:
+            try:
+                self._game_on = recorder.game_running()
+                mode = self.s.get("rec_mode", "siege")
+                want = mode == "always" or (mode == "siege" and self._game_on)
+                if not want:
+                    self._rec_user_off = False
+                if want and not self.rec.running and not self._rec_user_off:
+                    self.q.put(("rec_auto", "start"))
+                elif not want and self.rec.running and not self.rec.recording and not self._rec_manual:
+                    self.q.put(("rec_auto", "stop"))
+            except Exception:
+                pass
+            time.sleep(8)
+
+    def _rec_bg(self, fn):
+        threading.Thread(target=fn, daemon=True).start()
+
+    def rec_toggle_buffer(self):
+        if self.rec.running:
+            self._rec_manual = False
+            self._rec_user_off = True
+            self.status("Turning the recorder off…")
+            self._rec_bg(self.rec.stop)
+        else:
+            self._rec_manual = True
+            self._rec_user_off = False
+            self.status("Starting the recorder…")
+            self._rec_bg(self.rec.start)
+
+    def rec_save(self):
+        if not self.rec.running:
+            self.status("The replay buffer is off. Turn it on in the Recorder tab first.")
+            self._beep(False)
+            return
+        self.status("Saving clip…")
+        self.rec.save_replay()
+
+    def rec_toggle_record(self):
+        if not self.rec.recording:
+            self._rec_manual = self._rec_manual or not self.rec.running
+        self._rec_bg(self.rec.toggle_recording)
+
+    def _beep(self, good=True):
+        if self.s.get("notify_sound", True):
+            try:
+                import winsound
+                winsound.MessageBeep(winsound.MB_OK if good else winsound.MB_ICONHAND)
+            except Exception:
+                pass
+
+    def settings_changed(self, key):
+        if key in ("hk_clip", "hk_record"):
+            self._bind_hotkeys()
+        elif key in ("rec_fps", "rec_bitrate", "rec_resolution", "rec_encoder", "rec_game_audio", "rec_game_vol",
+                     "rec_mic", "mic_device", "mic_vol", "separate_tracks"):
+            self._rec_bg(self.rec.restart)
+        if self.current == "recorder":
+            self.pages["recorder"].refresh_state()
+
+    def _shutdown_recorder(self):
+        try:
+            self.hotkeys.stop()
+        except Exception:
+            pass
+        try:
+            self.rec.stop()
+        except Exception:
+            pass
+
     def _storage_check(self):
         try:
             n, _ = core.enforce_storage(self.s, self.state, log=lambda t: self.q.put(("log", t)))
@@ -1357,6 +1538,9 @@ class App:
 
     def notify(self, title, body="", path=None):
         """Small pop-up in the bottom-right corner of the screen (works while the app is minimized)."""
+        if self._game_on and getattr(self, "_quiet_in_game", True):
+            self._beep(True)                 # in game: just a sound, never a window over Siege
+            return
         if self.s.get("notify_sound", True):
             try:
                 import winsound
@@ -1474,6 +1658,37 @@ class App:
                 elif kind == "vthumb":
                     for k in ("tiktok", "youtube"):
                         self.pages[k].set_thumb(*val)
+                elif kind == "rec":
+                    k, v = val
+                    if k == "saved":
+                        what = "Recording" if " Recording " in os.path.basename(v) else "Clip"
+                        self.status(f"✅ {what} saved: {os.path.basename(v)}", log=True)
+                        if self.s.get("notify_made", True):
+                            self.notify(f"{what} saved", os.path.basename(v), v)
+                        threading.Thread(target=self._storage_check, daemon=True).start()
+                        if self.current == "recorder":
+                            self.pages["recorder"].render()
+                    elif k == "error":
+                        self.status("⚠ " + v, log=True)
+                        self._beep(False)
+                    elif k == "info":
+                        self.status(v)
+                    if self.current == "recorder":
+                        self.pages["recorder"].refresh_state()
+                elif kind == "hotkey":
+                    if val == "clip":
+                        self.rec_save()
+                    elif val == "record":
+                        self.rec_toggle_record()
+                elif kind == "hotkey_fail":
+                    self.status(f"⚠ Another app is already using {val[1]}. Pick a different key in Settings → Hotkeys.",
+                                log=True)
+                elif kind == "rec_auto":
+                    if val == "start" and not self.rec.running:
+                        self.status("Siege is running: replay buffer on", log=True)
+                        self._rec_bg(self.rec.start)
+                    elif val == "stop" and self.rec.running and not self.rec.recording:
+                        self._rec_bg(self.rec.stop)
                 elif kind == "status":
                     self.status(val)
                 elif kind == "log":
