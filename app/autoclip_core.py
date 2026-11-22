@@ -72,6 +72,7 @@ DEFAULTS = {
     "export_encoder": "Auto",     # Auto / GPU / CPU
     # recorder (used by the built-in recorder)
     "rec_replay_on": True,
+    "rec_mode": "siege",          # siege = only while Siege is running, always, off
     "replay_seconds": 30,
     "rec_resolution": "Native",
     "rec_fps": 60,
@@ -84,11 +85,9 @@ DEFAULTS = {
     "mic_device": "Default",
     "mic_vol": 100,
     "separate_tracks": True,
-    "push_to_talk": False,
     # hotkeys
-    "hk_clip": "F8",
-    "hk_record": "F9",
-    "hk_bookmark": "F10",
+    "hk_clip": "F10",             # F8 is Medal's clip key, so ours avoids it
+    "hk_record": "Shift+F10",
     # storage
     "storage_limit_gb": 50,
     "auto_delete_days": 0,        # 0 = never
@@ -497,9 +496,11 @@ def render(enc, segments, out_path, log=print, style=None, preview=False, fmt="v
             if e - s < 0.2:
                 continue
             part = os.path.join(work, f"p{i:02d}.mp4")
-            amap = "0:a:1" if enc.audio_count(src) >= 2 else "0:a:0"   # Medal track 2 = game audio only
+            na = enc.audio_count(src)
+            amap = "0:a:1" if na >= 2 else ("0:a:0" if na == 1 else "1:a:0")   # Medal track 2 = game audio only
+            silent = [] if na else ["-f", "lavfi", "-t", f"{e - s:.3f}", "-i", "anullsrc=r=48000:cl=stereo"]
             log(f"  cutting part {i + 1}/{len(segments)}")
-            enc.run(["-ss", f"{s:.3f}", "-t", f"{e - s:.3f}", "-i", src, "-filter_complex", fc, "-map", "[v]",
+            enc.run(["-ss", f"{s:.3f}", "-t", f"{e - s:.3f}", "-i", src] + silent + ["-filter_complex", fc, "-map", "[v]",
                      "-map", amap] + (venc or enc.venc(15)) + ["-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k",
                                                               "-ar", "48000", "-ac", "2", part])
             L.write(f"file '{part.replace(os.sep, '/')}'\n")
