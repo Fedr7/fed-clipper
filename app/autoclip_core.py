@@ -123,6 +123,7 @@ DEFAULTS = {
     # notifications
     "notify_made": True,
     "notify_clip": True,          # tell me when a clip is saved
+    "ingame_popup": True,         # small pop-up over the game (never takes focus)
     "notify_kill": False,         # tell me on every detected kill
     "notify_sound": True,
     "notify_update": True,
