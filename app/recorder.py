@@ -25,6 +25,7 @@ import autoclip_core as core
 import killfeed
 
 SEG = 2                                   # seconds per piece
+STALL_SECS = 8                            # no new piece for this long = the screen capture is stuck
 SCRATCH = os.path.join(core.APP_DIR, "replay")
 GAME_EXES = ("rainbowsix.exe", "rainbowsix_vulkan.exe", "rainbowsix_be.exe")
 VENDORS = {"NVIDIA": "nvenc", "AMD": "amf", "Intel": "qsv"}
@@ -521,11 +522,21 @@ class Recorder:
             self.on_event("state", None)
 
     def _prune(self, proc):
+        last_idx, last_t = None, time.time()
         while proc is self.proc and self.running:
             time.sleep(SEG)
+            idx = seg_indices()
+            # Watchdog: if the screen capture stops delivering frames (Siege switching to exclusive fullscreen or
+            # changing resolution does this), the current piece never closes and only sound gets recorded.
+            cur_i = idx[-1] if idx else None
+            now = time.time()
+            if cur_i != last_idx:
+                last_idx, last_t = cur_i, now
+            elif now - last_t > STALL_SECS and now - self.started_at > 12 and not self.saving:
+                threading.Thread(target=self._stalled, args=(proc,), daemon=True).start()
+                return
             if self.saving:                     # never delete pieces while a clip is being put together
                 continue
-            idx = seg_indices()
             if not idx:
                 continue
             cur = idx[-1]
@@ -541,6 +552,24 @@ class Recorder:
                         os.remove(seg_path(i))
                     except OSError:
                         pass
+
+    def _stalled(self, proc):
+        if proc is not self.proc or not self.running:
+            return
+        now = time.time()
+        self._stalls = [t for t in getattr(self, "_stalls", []) if now - t < 180] + [now]
+        self._log(f"video capture stalled (no new frames) - restarting the capture ({len(self._stalls)} in 3 min)")
+        if len(self._stalls) >= 3:
+            if not getattr(self, "_stall_warned", False):
+                self._stall_warned = True
+                self.on_event("error", "Siege's fullscreen mode is blocking screen capture. In Siege go to "
+                                       "Options > Display > Display Mode and pick Borderless.")
+            time.sleep(30)                      # don't hammer it if it keeps failing
+            if proc is not self.proc or not self.running:
+                return
+        self.stop()
+        self.codec = None
+        self.start()
 
     # ---------------------------------------------------------------- kill detection + auto-clip
     def _detect(self, proc):
