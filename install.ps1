@@ -52,6 +52,8 @@ Write-Host '  - Python ready'
 & $py -m pip install --user --upgrade --quiet --disable-pip-version-check pillow 2>$null
 if ($LASTEXITCODE -ne 0) { Fail "Couldn't install Pillow. Check your internet connection and run Install.bat again." }
 Write-Host '  - Image support ready'
+& $py -m pip install --user --upgrade --quiet --disable-pip-version-check PyAudioWPatch 2>$null
+if ($LASTEXITCODE -eq 0) { Write-Host '  - Game sound capture ready' }
 
 # ---------- 3. App files ----------
 New-Item -ItemType Directory -Force -Path $Dest | Out-Null
