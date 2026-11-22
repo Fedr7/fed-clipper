@@ -1,6 +1,6 @@
 {
-  "version": "1.7.4",
-  "notes": "New: Report a bug right from the app (click your profile picture).",
+  "version": "1.7.5",
+  "notes": "Fix: clips no longer come out as just your desktop when Siege is in fullscreen.",
   "files": [
     "sounds.py",
     "killfeed.py",
