@@ -379,7 +379,9 @@ def make_settings_page(Page, ScrollGrid):
             c = self.card("While you play")
             self.toggle(c, "notify_clip", "Pop-up when a clip is saved",
                         "A small note in the corner of your screen. It never steals focus from the game.")
-            self.toggle(c, "hotkey_sound", "Sound when I press a hotkey", "So you know the clip saved.")
+            self.toggle(c, "ingame_popup", "Small pop-up in game",
+                        "A slim card in the top-right that disappears after 2 seconds. It never tabs you out. "
+                        "Works best with Siege in Borderless mode.")
 
         def _intro(self):
             self.heading("Your intro", "The glowing title at the start of every video.")
