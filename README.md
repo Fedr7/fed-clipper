@@ -1,6 +1,6 @@
 # Breachcut
 
-Turns your Rainbow Six Siege Medal clips into TikToks, YouTube Shorts and YouTube videos, automatically.
+Records Rainbow Six Siege, spots your kills by itself and turns them into TikToks, YouTube Shorts and YouTube videos, automatically.
 
 **Website:** https://fedr7.github.io/fed-clipper/
 
@@ -13,5 +13,5 @@ Turns your Rainbow Six Siege Medal clips into TikToks, YouTube Shorts and YouTub
 The installer sets up Python, Pillow and FFmpeg if you don't have them, copies Breachcut to
 `%LOCALAPPDATA%\Breachcut`, and builds its artwork. It's a plain script: open `install.ps1` in Notepad to see every step.
 
-Breachcut only reads the clips Medal saves. It never touches the game.
-Not affiliated with Ubisoft or Medal. [Privacy](PRIVACY.md) · [Terms](TERMS.md)
+Breachcut only looks at your screen and speakers, like any recorder. It never touches the game.
+Not affiliated with Ubisoft. [Privacy](PRIVACY.md) · [Terms](TERMS.md)
