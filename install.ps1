@@ -1,4 +1,4 @@
-# Breachcut installer (run by Install.bat). Sets up Python, Pillow and FFmpeg, copies Breachcut to
+# Breachcut installer (run by Install.bat). Sets up Python, Pillow, numpy and FFmpeg, copies Breachcut to
 # %LOCALAPPDATA%\Breachcut, builds its artwork, adds Desktop + Start menu shortcuts and opens it.
 $ErrorActionPreference = 'Continue'
 $Here = $PSScriptRoot
@@ -54,6 +54,8 @@ if ($LASTEXITCODE -ne 0) { Fail "Couldn't install Pillow. Check your internet co
 Write-Host '  - Image support ready'
 & $py -m pip install --user --upgrade --quiet --disable-pip-version-check PyAudioWPatch 2>$null
 if ($LASTEXITCODE -eq 0) { Write-Host '  - Game sound capture ready' }
+& $py -m pip install --user --upgrade --quiet --disable-pip-version-check numpy 2>$null
+if ($LASTEXITCODE -eq 0) { Write-Host '  - Kill detection ready' }
 
 # ---------- 3. App files ----------
 New-Item -ItemType Directory -Force -Path $Dest | Out-Null
